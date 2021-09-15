@@ -1,0 +1,14 @@
+# Git ignore
+# ------------------------
+*
+!*/
+# ------------------------
+
+node_modules/
+!*.js
+!*.html
+!package.json
+!.git*
+!.npm*
+!dist/**/*
+

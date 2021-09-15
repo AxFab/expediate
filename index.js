@@ -20,9 +20,9 @@
  */
 'use strict';
 
-const http = require('http'), https = require('https');
-
-const Router = {};
+const http = require('http'),
+  https = require('https'),
+  serveStatic = require('./static.js');
 
 /**
  * Prepare an layer object to define a new route
@@ -32,7 +32,7 @@ const Router = {};
  * @param {Listener} listener
  * @return {Layer}
  */
-Router.buildLayer = function (method, path, listener) {
+function buildRouteLayer(method, path, listener) {
   if (method)
     method = method.toUpperCase();
   if (typeof path === 'function') {
@@ -54,7 +54,7 @@ Router.buildLayer = function (method, path, listener) {
  * @param {String[]} parts
  * @return {Bool}
  */
-Router.matchLayer = function (layer, req, parts) {
+function matchRouteLayer(layer, req, parts) {
   if (layer.method && layer.method != req.method)
     return false;
   let params = {}
@@ -79,12 +79,13 @@ Router.matchLayer = function (layer, req, parts) {
  * @param {http.ClientRequest} req
  * @param {http.ServerResponse} res
  */
-Router.updateReq = function (req, res) {
+function updateHttpObject(req, res) {
   if (req.queries)
     return
   req.queries = {};
 
   let qry = new URL(`http://${req.headers.host}${req.url}`)
+  req.originalUrl = req.url;
   req.path = qry.pathname
 
   // Parse URL-encoded data
@@ -157,62 +158,22 @@ Router.updateReq = function (req, res) {
 
     if (opts.path == null)
       opts.path = '/';
+    txt += `; Path=${opts.path}`
 
     res.setHeader('Set-Cookie', txt);
     return res;
-  };
-
-  res.sendFile = function sendFile(path, options, callback) {
-    var done = callback;
-    var req = this.req;
-    var res = this;
-    var next = req.next;
-    var opts = options || {};
-
-    if (!path) {
-      throw new TypeError('path argument is required to res.sendFile');
-    }
-
-    if (typeof path !== 'string') {
-      throw new TypeError('path must be a string to res.sendFile')
-    }
-
-    // support function as second arg
-    if (typeof options === 'function') {
-      done = options;
-      opts = {};
-    }
-
-    if (!opts.root && !isAbsolute(path)) {
-      throw new TypeError('path must be absolute or specify root to res.sendFile');
-    }
-
-    // create file stream
-    var pathname = encodeURI(path);
-    var file = send(req, pathname, opts);
-
-    // transfer
-    sendfile(res, file, opts, function (err) {
-      if (done) return done(err);
-      if (err && err.code === 'EISDIR') return next();
-
-      // next() all but write errors
-      if (err && err.code !== 'ECONNABORTED' && err.syscall !== 'write') {
-        next(err);
-      }
-    });
   };
 
 };
 
 // -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-module.exports = NewRouter;
+module.exports = Router;
 
 /**
  * This function create a new router function as a web listener.
  */
-function NewRouter() {
+function Router() {
 
   const routes = [];
 
@@ -220,13 +181,13 @@ function NewRouter() {
     const method = req.method;
     const url = req.url;
     let idx = 0;
-    Router.updateReq(req, res);
+    updateHttpObject(req, res);
     const parts = req.path.split('/').filter(x => x.length > 0);
 
     const next = () => {
       while (idx < routes.length) {
         let layer = routes[idx++];
-        if (Router.matchLayer(layer, req, parts))
+        if (matchRouteLayer(layer, req, parts))
           return layer.listener(req, res, next);
       }
 
@@ -243,19 +204,23 @@ function NewRouter() {
     }
   };
 
-  listener.use = (p, l) => routes.push(Router.buildLayer(null, p, l));
-  listener.all = (p, l) => routes.push(Router.buildLayer(null, p, l));
-  listener.get = (p, l) => routes.push(Router.buildLayer('GET', p, l));
-  listener.put = (p, l) => routes.push(Router.buildLayer('PUT', p, l));
-  listener.post = (p, l) => routes.push(Router.buildLayer('POST', p, l));
-  listener.delete = (p, l) => routes.push(Router.buildLayer('DELETE', p, l));
-  listener.patch = (p, l) => routes.push(Router.buildLayer('PATCH', p, l));
+  listener.use = (p, l) => routes.push(buildRouteLayer(null, p, l));
+  listener.all = (p, l) => routes.push(buildRouteLayer(null, p, l));
+  listener.get = (p, l) => routes.push(buildRouteLayer('GET', p, l));
+  listener.put = (p, l) => routes.push(buildRouteLayer('PUT', p, l));
+  listener.post = (p, l) => routes.push(buildRouteLayer('POST', p, l));
+  listener.delete = (p, l) => routes.push(buildRouteLayer('DELETE', p, l));
+  listener.patch = (p, l) => routes.push(buildRouteLayer('PATCH', p, l));
 
-  listener.listen = (port, opts) => {
+  listener.listen = (port, opts, cb) => {
+    if (typeof opts === 'function') {
+      cb = opts;
+      opts = null;
+    }
     if (opts && opts.key && opts.cert)
-      https.createServer(opts, listener).listen(port);
+      https.createServer(opts, listener).listen(port, cb);
     else
-      http.createServer(listener).listen(port);
+      http.createServer(listener).listen(port, cb);
   };
 
   return listener;
@@ -263,7 +228,7 @@ function NewRouter() {
 
 // -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-NewRouter.logger = () => {
+Router.logger = () => {
   return (req, res, next) => {
     const nclr = '\x1b[0m';
     const colors = [
@@ -288,12 +253,9 @@ NewRouter.logger = () => {
   };
 };
 
-// NewRouter.static = (root) => {
-//   return (req, res, next) => {
-//   };
-// };
+Router.static = serveStatic;
 
-NewRouter.session = (opts) => {
+Router.session = (opts) => {
   return (req, res, next) => {
     let ssid = req.cookies.ssid;
     req.session = opts.openSession(ssid);

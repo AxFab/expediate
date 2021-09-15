@@ -1,11 +1,14 @@
 {
   "name": "expediate",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Fast and simple, minimalist web framework",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Fabien Bavent <fabien.bavet@gmail.com>",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "mime": "^1.6.0"
+  }
 }

@@ -21,6 +21,10 @@ app.get('/', function (req, res) {
 app.listen(3000)
 ```
 
+The main reason for this package is that expressjs grow to become extra
+complicated with tons of dependencies. Expediate aims to keep thing simple
+while retaining the most widely used features.
+
 ## Installation
 
 This is a [Node.js](https://nodejs.org/en/) module available through the
@@ -37,6 +41,29 @@ Installation is done using the
 ```bash
 $ npm install expediate
 ```
+
+## Usage
+
+
+### Middleware
+
+ json => Parse Json body
+ static => Serve static files
+ urlencdeded => Parse url encoded
+
+```js
+var apiApp = expediate()
+apiApp.use('/myEndpoint', ...)
+
+var app = expediate();
+var app.use('/api', apiApp);
+
+app.listen(80)
+app.listen(443, { key: 'xx', cert: 'xx' })
+apiApp.listen(8900) // Only api
+```
+
+
 
 ## License
 
