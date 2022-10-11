@@ -22,7 +22,7 @@
 
 const http = require('http'),
   https = require('https'),
-  serveStatic = require('./static.js');
+  serv = require('./static.js');
 
 /**
  * Prepare an layer object to define a new route
@@ -35,11 +35,15 @@ const http = require('http'),
 function buildRouteLayer(method, path, listener) {
   if (method)
     method = method.toUpperCase();
-  if (typeof path === 'function') {
+  if (typeof path !== 'string' && !(path instanceof RegExp)) {
     listener = path;
     path = '/';
   }
-  let parts = path.split('/').filter(x => x.length > 0);
+  let parts = path instanceof RegExp ? null : path.split('/').filter(x => x.length > 0);
+  if (listener && typeof listener !== 'function')
+    listener = listener.listener // Route object
+  if (typeof listener !== 'function')
+    throw new TypeError('Incorrect listener type');
   return { method, path, parts, listener };
 };
 
@@ -54,14 +58,28 @@ function buildRouteLayer(method, path, listener) {
  * @param {String[]} parts
  * @return {Bool}
  */
-function matchRouteLayer(layer, req, parts) {
+function matchRouteLayer(layer, req, parts, path) {
   if (layer.method && layer.method != req.method)
     return false;
   let params = {}
   for (let i = 0; ; ++i) {
+    if (layer.parts == null) {
+      var m = layer.path.exec(path);
+      if (m == null)
+        return false;
+      for (let i = 1; i < m.length; ++i)
+        params[i] = m[i];
+      req.path = m.index == 0 ? path.replace(m[0], '') : path;
+      req.queries.route = params;
+      for (var k in params)
+        req.params[k] = params[k];
+      return true;
+    }
     if (layer.parts.length <= i) {
       req.path = '/' + parts.slice(i).join('/');
       req.queries.route = params;
+      for (var k in params)
+        req.params[k] = params[k];
       return true;
     } else if (parts.length <= i)
       return false;
@@ -93,21 +111,19 @@ function updateHttpObject(req, res) {
   for(var pair of qry.searchParams.entries())
     params[pair[0]] = pair[1];
   req.queries.url = params;
+  req.params = params;
 
   // Parse cookies
   if (req.cookies == null) {
     req.cookies = {};
-    var cookies = req.headers.cookie;
-    if (cookies) {
-      cookies = cookies.split(';')
+    if (req.headers.cookie) {
+      const dico = req.headers.cookie.split(';')
         .map(x => x.replace(/^\s+|\s+$/g, '').split('='));
-      for (var k in cookies) {
-        let key = cookies[k][0]
-        let val = cookies[k][1]
+      for (var k in dico) {
+        let key = dico[k][0]
+        let val = dico[k][1]
         req.cookies[key] = val;
-        if (typeof val == 'string') {
-          // TODO s: Cookie is signed, j: Cookie is a JSON
-        }
+        // TODO s: Cookie is signed, j: Cookie is a JSON
       }
     }
   }
@@ -116,15 +132,16 @@ function updateHttpObject(req, res) {
   res.setHeader('X-Powered-By', 'Expediate');
 
   res.send = (data) => {
-    res.write(data);
+    if (data)
+      res.write(data);
     res.end();
   }
 
   res.status = (code, headers) => {
+    res.statusCode = code;
     if (headers)
       for (var k in headers)
         res.setHeader(k, headers[k])
-    res.writeHead(code)
     return res;
   };
 
@@ -187,7 +204,7 @@ function Router() {
     const next = () => {
       while (idx < routes.length) {
         let layer = routes[idx++];
-        if (matchRouteLayer(layer, req, parts))
+        if (matchRouteLayer(layer, req, parts, req.path))
           return layer.listener(req, res, next);
       }
 
@@ -247,13 +264,35 @@ Router.logger = () => {
       const user = req.session ? `${req.session.username}/${req.session.ssid}` : '-'
       const status = `${clr}${res.statusCode}${nclr}`
       const elp = `${req.elapsed} ms`
-      console.log(`${rec} ${status} ${req.method} ${path} ${ip} <${user}> ${elp}`);
+      const len = res.getHeader('content-length') ? res.getHeader('content-length') : '-';
+      console.log(`${rec} ${status} ${req.method} ${path} ${ip} <${user}> ${elp} (${len})`);
     })
     next();
   };
 };
 
-Router.static = serveStatic;
+Router.parseBody = () => {
+  return (req, res, next) => {
+    let data = '';
+    req.on('data', chunk => {
+        data += chunk;
+    });
+    req.on('end', () => {
+        try {
+            req.body = JSON.parse(data);
+        } catch {
+            req.body = data;
+        }
+        next();
+    });
+  }
+}
+
+Router.static = serv.serveStatic;
+Router.file = serv.serveFile;
+Router.sendFile = serv.sendFile;
+Router.sendIndex = serv.sendIndex;
+
 
 Router.session = (opts) => {
   return (req, res, next) => {

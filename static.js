@@ -253,14 +253,14 @@ function sendFile(req, res, pathname, stat, opts) {
 
   // Conditionnal GET
   if (hasCondition(req.headers)) {
-    if (!conditionMatch(req.headers, res.getHeaders())) {
-      return HTTP.PRECONDITION_FAILS(res)
-    }
+    if (conditionMatch(req.headers, res.getHeaders())) {
 
-    if (isCacheFresh(req.headers, res.getHeaders())) {
-      removeContentHeaders(res);
-      return HTTP.NOT_MODIFIED(res);
+      if (isCacheFresh(req.headers, res.getHeaders())) {
+        removeContentHeaders(res);
+        return HTTP.NOT_MODIFIED(res);
+      }
     }
+    // return HTTP.PRECONDITION_FAILS(res)
   }
 
 
@@ -277,7 +277,7 @@ function sendFile(req, res, pathname, stat, opts) {
   });
   stream.on('error', err => {
     if (finished) return;
-    console.log('ERROR', pathname, err)
+    console.warn('static error', pathname, err)
     HTTP.INTERNAL_ERROR(res, err.code);
     finished = true;
     destroyReadStream(stream);
@@ -310,7 +310,7 @@ function sendIndex(req, res, pathname, stat, opts) {
   })
 }
 
-function serveStatic (root, options) {
+function serveOptions(root, options) {
 
   if (!root)
     throw new TypeError('root path required')
@@ -319,7 +319,7 @@ function serveStatic (root, options) {
 
   // copy options
   var opts = options || {
-    fallthrough: false,
+    fallthrough: true,
     redirect: false,
   };
   opts.fallthrough = opts.fallthrough !== false
@@ -329,8 +329,13 @@ function serveStatic (root, options) {
   if (opts.setHeaders && typeof opts.setHeaders !== 'function')
     throw new TypeError('option setHeaders must be function')
 
+  return opts;
+}
 
-  return function serveStatic (req, res, next) {
+function serveStatic (root, options) {
+
+  var opts = serveOptions(root, options);
+  return function (req, res, next) {
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       if (opts.fallthrough)
@@ -338,7 +343,7 @@ function serveStatic (root, options) {
       return HTTP.NOT_ALLOWED(res);
     }
 
-    var originalUrl = decodeURIComponent(req.originalUrl || req.path || req.url)
+    var originalUrl = decodeURIComponent(/*req.originalUrl || */req.path || req.url)
     var pathname = originalUrl
 
     // make sure redirect occurs at mount
@@ -365,6 +370,7 @@ function serveStatic (root, options) {
         if (err.code == 'ENOENT' || err.code == 'ENAMETOOLONG' || err.code == 'ENOTDIR') {
           if (opts.fallthrough)
             return next();
+          console.warn('static error:', err)
           return HTTP.NOT_FOUND(res)
         }
         return HTTP.INTERNAL_ERROR(res, err.code);
@@ -383,6 +389,28 @@ function serveStatic (root, options) {
   }
 }
 
+function serveFile (root, options) {
+
+  var opts = serveOptions(root, options);
+  return function (req, res, next) {
+
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      if (opts.fallthrough)
+        return next()
+      return HTTP.NOT_ALLOWED(res);
+    }
+
+    const pathname = opts.root;
+    fs.stat(pathname, function onstat (err, stat) {
+      if (err)
+        return HTTP.INTERNAL_ERROR(res, err.code);
+      if (stat.isDirectory())
+        return HTTP.INTERNAL_ERROR(res, err.code);
+
+      sendFile(req, res, pathname, stat, opts)
+    });
+  }
+}
 
 
-module.exports = serveStatic;
+module.exports = { serveStatic, serveFile, sendFile, sendIndex };
