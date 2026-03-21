@@ -1,6 +1,6 @@
 /**
  * jwt-auth.js
- * Plugin Express.js pour l'authentification JWT
+ * Middleware pour l'authentification JWT
  * Gère : création de token, validation, et renouvellement via refresh token
  */
 

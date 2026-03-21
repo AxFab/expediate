@@ -28,26 +28,31 @@ const mime = require('mime');
 const UP_PATH_REGEXP = /(?:^|[\\/])\.\.(?:[\\/]|$)/
 
 const HTTP = {
-  NOT_MODIFIED: res => httpSend(res, 304),
-  FORBIDDEN: res => httpSend(res, 403, {
-        'Content-Security-Policy': "default-src 'none'",
-        'X-Content-Type-Options': 'nosniff'
-      }, 'Forbidden'),
-  NOT_FOUND: res => httpSend(res, 404, {
-        // 'Content-Type': 'text/html; charset=UTF-8',
-        'Content-Security-Policy': "default-src 'none'",
-        'X-Content-Type-Options': 'nosniff'
-      }, 'Not Found'),
-  NOT_ALLOWED: res => httpSend(res, 405, { 'Allow': 'GET, HEAD' }),
-  PRECONDITION_FAILS: res => httpSend(res, 412, {
-        'Content-Security-Policy': "default-src 'none'",
-        'X-Content-Type-Options': 'nosniff'
-      }, 'Precondition Failed'),
-  INTERNAL_ERROR: (res, err) => httpSend(res, 500, {
-        'Content-Security-Policy': "default-src 'none'",
-        'X-Content-Type-Options': 'nosniff'
-      }, `Internal error: ${err}`),
+  NOT_MODIFIED: (res, opts) => res.status(304, opts.headers).end(),
+  FORBIDDEN: (res, opts) => res.status(403, opts.headers).send('Forbidden'),
+  NOT_FOUND: (res, opts) => res.status(404, opts.headers).send('Not Found'),
+  NOT_ALLOWED: (res, opts) => res.status(405, { ...opts.headers, 'Allow': 'GET, HEAD' }).end(),
+  PRECONDITION_FAILS: (res, opts) => res.status(412, opts.headers).send('Precondition Failed'),
+  INTERNAL_ERROR: (res, opts, err) => res.status(500, opts.headers).send(`Internal error: ${err}`),
 };
+
+const DEFAULT_OPTIONS = {
+  headers: {
+    'Content-Security-Policy': "default-src 'none'",
+    'X-Content-Type-Options': 'nosniff'
+  },
+  // setHeader
+  fallthrough: false,
+  maxage: 0, 
+  immutable: false,
+  etag: true,
+  lastModified: true,
+  contentType: null,
+  dotfiles: 'hide', // 'allow', 'deny',
+  redirect: true,
+  indexOf: false,
+  // root, will be set by static
+}
 
 // Destroy a read stream properly
 function destroyReadStream(stream) {
@@ -74,19 +79,6 @@ function createETag(stat) {
   var mtime = stat.mtime.getTime().toString(16)
   var size = stat.size.toString(16)
   return 'W/"' + size + '-' + mtime + '"'
-}
-
-// Basic utility for default answers
-function httpSend (res, code, headers, body) {
-  headers = headers || {}
-  body = body || ''
-  res.statusCode = code;
-  for (let k in headers)
-    res.setHeader(k.toString(), headers[k].toString())
-  res.setHeader('Content-Length', Buffer.byteLength(body))
-  if (body)
-    res.write(body);
-  res.end();
 }
 
 // Parse a HTTP token list.
@@ -214,12 +206,64 @@ function isCacheFresh (req, res) {
   return true
 }
 
-function sendFile(req, res, pathname, stat, opts) {
+
+function serveOptions(root, options) {
+
+  if (!root)
+    throw new TypeError('root path required')
+  else if (typeof root !== 'string')
+    throw new TypeError('root path must be a string')
+
+  // copy options
+  var opts = { ...DEFAULT_OPTIONS, ...options  };
+  opts.fallthrough = opts.fallthrough !== false
+  opts.redirect = opts.redirect !== false
+  opts.maxage = opts.maxage || opts.maxAge || 0
+  opts.root = path.resolve(root)
+  return opts;
+}
+
+/** Create a page similar to Apache index-of */
+function writeIndexOf(queries, path, directoryPath, parentDir, go) 
+{
+  fs.readdir(directoryPath, (err, files) => {
+    if (err) 
+      return go(null, err);
+    let html = '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">\n';
+    html += '<html>\n';
+    html += `<head><title>Index of ${path}</title></head>\n`
+    html += `<body><h1>Index of ${path}</h1><table>\n`
+    // TODO -- OrderBy ?C=N to sorr by Name, ?C=M to sort by modified date, ?C=S to sort by date, ?C=D to sort by description ; ?O=A sort by ascending order, ?O=D sort by desending order ; if already sorted, create link to sort in reverse order. By default is sorted by ascending name
+    html += '<tr><th valign="top"><img src="/icons/blank.gif" alt="[ICO]"></th><th><a href="?C=N;O=D">Name</a></th><th><a href="?C=M;O=A">Last modified</a></th><th><a href="?C=S;O=A">Size</a></th><th><a href="?C=D;O=A">Description</a></th></tr>\n'
+    html += '<tr><th colspan="5"><hr></th></tr>\n'
+    if (parentDir)
+      html += `<tr><td valign="top"><img src="/icons/back.gif" alt="[PARENTDIR]"></td><td><a href="${parentDir}">Parent Directory</a></td><td>&nbsp;</td><td align="right">  - </td><td>&nbsp;</td></tr>\n`
+    for (var file of files) {
+      // TODO -- sync stat of file... Order by later...
+      const stat = fs.statSync(path.join(directoryPath, file));
+      const type = mime.lookup(pathname); 
+      const alt = stat.isDirectory() ? 'folder' : (type.indexOf('/') > 0 ? type.substr(0, type.indexOf('/')): 'unknown');
+      const icon = `/icons/${alt}.gif`; // 'folder', 'text', 'image', 'layout', ...
+      const name = file + (stat.isDirectory() ? '/' : '');
+      const modified = stat.modified; // '2019-03-26 22:09';
+      const size = stat.size; //'25K';
+      html += `<tr><td valign="top"><img src="${icon}" alt="${alt}"></td><td><a href="${name}"></a></td><td align="right">${modified}</td><td align="right">${size}</td><td>&nbsp;</td></tr>\n`
+    }
+    html += '<tr><th colspan="5"><hr></th></tr>\n'
+    html += '</table><address>Expediate/2.0.0</address></body></html>\n'
+    go(html);
+  });
+}
+
+
+function sendIt(req, res, pathname, stat, opts) {
   const len = stat.size
   const etag = createETag(stat)
 
-  if (opts.setHeaders)
-    opts.setHeaders(res);
+  if (opts.headers) {
+    for (let key in opts.headers) 
+      res.setHeader(key, opts.headers[key]);
+  }
 
   // set cache-control
   if (!res.getHeader('Cache-Control') && opts.maxage) {
@@ -257,10 +301,10 @@ function sendFile(req, res, pathname, stat, opts) {
 
       if (isCacheFresh(req.headers, res.getHeaders())) {
         removeContentHeaders(res);
-        return HTTP.NOT_MODIFIED(res);
+        return HTTP.NOT_MODIFIED(res, opts);
       }
     }
-    // return HTTP.PRECONDITION_FAILS(res)
+    // return HTTP.PRECONDITION_FAILS(res, opts)
   }
 
 
@@ -278,7 +322,7 @@ function sendFile(req, res, pathname, stat, opts) {
   stream.on('error', err => {
     if (finished) return;
     console.warn('static error', pathname, err)
-    HTTP.INTERNAL_ERROR(res, err.code);
+    HTTP.INTERNAL_ERROR(res, opts, err.code);
     finished = true;
     destroyReadStream(stream);
   });
@@ -288,51 +332,49 @@ function sendFile(req, res, pathname, stat, opts) {
   stream.pipe(res);
 }
 
-function sendIndex(req, res, pathname, stat, opts) {
-
-  var p = path.join(pathname, 'index.html')
-  fs.stat(p, function (err, stat) {
+/**
+ * Method used to send a static file as a response to a HTTP request
+ * Handle HEAD, condtional GET, Etags, and mime-type using 'mime' npm package
+ * @param {*} req 
+ * @param {*} res 
+ * @param {*} pathname filename of the file to send
+ * @param {*} opts 
+ * @returns 
+ */
+function sendFile(req, res, pathname, opts) 
+{
+  fs.stat(pathname, function (err, stat) {
     if (err) {
       if (err.code == 'ENOENT' || err.code == 'ENAMETOOLONG' || err.code == 'ENOTDIR') {
-        if (opts.fallthrough)
-          return next();
-        return HTTP.NOT_FOUND(res)
+        return HTTP.NOT_FOUND(res, opts)
       }
-      return HTTP.INTERNAL_ERROR(res, err.code);
+      return HTTP.INTERNAL_ERROR(res, opts, err.code);
     }
 
-    // index file support
     if (stat.isDirectory()) {
-      return HTTP.NOT_FOUND(res);
+      if (opts.indexOf === true) {
+        writeIndexOf(req.queries.url, req.path, pathname, req.path !== '/' ? path.dirname(req.path) : null, (html, err) => {
+          if (err)
+            return HTTP.INTERNAL_ERROR(res, opts, err.code);
+          return res.send(200, { ...opts.headers }).send(html);
+        })
+      }
+      // TODO -- index file support
+      return HTTP.NOT_FOUND(res, opts);
     }
 
-    sendFile(req, res, p, stat, opts)
-  })
+    sendIt(req, res, pathname, stat, opts)
+  });
 }
 
-function serveOptions(root, options) {
-
-  if (!root)
-    throw new TypeError('root path required')
-  else if (typeof root !== 'string')
-    throw new TypeError('root path must be a string')
-
-  // copy options
-  var opts = options || {
-    fallthrough: true,
-    redirect: false,
-  };
-  opts.fallthrough = opts.fallthrough !== false
-  opts.redirect = opts.redirect !== false
-  opts.maxage = opts.maxage || opts.maxAge || 0
-  opts.root = path.resolve(root)
-  if (opts.setHeaders && typeof opts.setHeaders !== 'function')
-    throw new TypeError('option setHeaders must be function')
-
-  return opts;
-}
-
-function serveStatic (root, options) {
+/**
+ * Middleware factory used to serve files in a public directory
+ * Handle HEAD, condtional GET, Etags, and mime-type using 'mime' npm package
+ * @param {*} root directory containing the files
+ * @param {*} options access, cache and response options
+ * @returns 
+ */
+function static (root, options) {
 
   var opts = serveOptions(root, options);
   return function (req, res, next) {
@@ -340,7 +382,7 @@ function serveStatic (root, options) {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       if (opts.fallthrough)
         return next()
-      return HTTP.NOT_ALLOWED(res);
+      return HTTP.NOT_ALLOWED(res, opts);
     }
 
     var originalUrl = decodeURIComponent(/*req.originalUrl || */req.path || req.url)
@@ -351,17 +393,18 @@ function serveStatic (root, options) {
       pathname = ''
     }
 
+    // Forbid any path part which can be exploited as malveillant access
     if (UP_PATH_REGEXP.test(pathname))
-      return HTTP.FORBIDDEN(res);
+      return HTTP.FORBIDDEN(res, opts);
 
     // resolve the path
     pathname = path.resolve(path.normalize(opts.root + '/' + pathname));
 
     // dotfile handling
-    if (opts.dotfiles != 'allow' && pathname.indexOf('/.') >= 0) {
+    if (!opts.dotfiles != 'allow' && pathname.indexOf('/.') >= 0) {
       if (opts.dotfiles == 'deny')
-        return HTTP.FORBIDDEN(res);
-      return HTTP.NOT_FOUND(res);
+        return HTTP.FORBIDDEN(res, opts);
+      return HTTP.NOT_FOUND(res, opts);
     }
 
     fs.stat(pathname, function onstat (err, stat) {
@@ -371,53 +414,58 @@ function serveStatic (root, options) {
           if (opts.fallthrough)
             return next();
           console.warn('static error:', err)
-          return HTTP.NOT_FOUND(res)
+          return HTTP.NOT_FOUND(res, opts)
         }
-        return HTTP.INTERNAL_ERROR(res, err.code);
+        return HTTP.INTERNAL_ERROR(res, opts, err.code);
       }
 
       // index file support
       if (stat.isDirectory()) {
-        // if (!opts.redirect)
-        //   return HTTP.NOT_FOUND(res);
-        return sendIndex(req, res, pathname, stat, opts)
+        if (!opts.redirect)
+          return HTTP.NOT_FOUND(res, opts);
+        return sendFile(req, res, path.join(pathname, 'index.html'), opts)
       }
 
 
-      sendFile(req, res, pathname, stat, opts)
+      sendIt(req, res, pathname, stat, opts)
     });
   }
 }
 
-function serveFile (root, options) {
+/**
+ * Middleware factory used to serve a unique file as response
+ * Handle HEAD, condtional GET, Etags, and mime-type using 'mime' npm package
+ * @param {*} root path of the filename to send
+ * @param {*} options access, cache and response options
+ * @returns 
+ */
+function file (root, options) {
 
   var opts = serveOptions(root, options);
   return function (req, res, next) {
 
-    const pathOk = req.path == '/' || !options.exactMatch;
     const methOk = req.method !== 'GET' && req.method !== 'HEAD';
-    if (!methOk || !pathOk) {
+    if (!methOk) {
       if (opts.fallthrough)
-        return next()
-      return HTTP.NOT_ALLOWED(res);
+        return next();
+      return HTTP.NOT_ALLOWED(res, opts);
     }
 
     const pathname = opts.root;
     fs.stat(pathname, function onstat (err, stat) {
       if (err)
-        return HTTP.INTERNAL_ERROR(res, err.code);
+        return HTTP.INTERNAL_ERROR(res, opts, err.code);
       if (stat.isDirectory())
-        return HTTP.INTERNAL_ERROR(res, err.code);
+        return HTTP.INTERNAL_ERROR(res, opts, err.code);
 
-      sendFile(req, res, pathname, stat, opts)
+      sendIt(req, res, pathname, stat, opts)
     });
   }
 }
 
 
 module.exports = { 
-  serveStatic, 
-  serveFile, 
-  sendFile, 
-  sendIndex 
+  static, 
+  file, 
+  sendFile
 };
