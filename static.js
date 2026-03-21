@@ -394,7 +394,9 @@ function serveFile (root, options) {
   var opts = serveOptions(root, options);
   return function (req, res, next) {
 
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const pathOk = req.path == '/' || !options.exactMatch;
+    const methOk = req.method !== 'GET' && req.method !== 'HEAD';
+    if (!methOk || !pathOk) {
       if (opts.fallthrough)
         return next()
       return HTTP.NOT_ALLOWED(res);
@@ -413,4 +415,9 @@ function serveFile (root, options) {
 }
 
 
-module.exports = { serveStatic, serveFile, sendFile, sendIndex };
+module.exports = { 
+  serveStatic, 
+  serveFile, 
+  sendFile, 
+  sendIndex 
+};
