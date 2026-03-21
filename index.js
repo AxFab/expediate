@@ -23,6 +23,9 @@
 const Router = require('./router.js');
 const serv = require('./static.js');
 const misc = require('./misc.js');
+const { createJwtPlugin } = require('./jwt-auth.js');
+const { apiBuilder } = require('./git.js');
+const { gitHandler } = require('./api.js');
 
 Router.static = serv.serveStatic;
 Router.file = serv.serveFile;
@@ -34,6 +37,9 @@ Router.parseBody = misc.parseBody;
 Router.json = misc.json;
 Router.session = misc.session;
 Router.createRouter = Router;
+Router.createJwtPlugin = createJwtPlugin;
+Router.apiBuilder = apiBuilder;
+Router.gitHandler = gitHandler;
 
 module.exports = Router;
 

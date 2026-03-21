@@ -221,6 +221,45 @@ const service = {
 }
 ```
 
+### Jwt middleware
+
+Handle creation and verification of JWT token.
+Create also refresh token to avoid reconnection, after JWT expiration.
+
+
+```js
+const crypto = require('crypto')
+const { createRouter, createJwtPlugin } = require('expediate');
+const app = createRouter();
+
+function hashPassword(password) {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+const userDatabase = new Map(); // <string: user>
+// {
+//   username: "alice",
+//   passwordHash: hashPassword("password123"),
+//   roles: ["admin", "editor"],
+//   permissions: ["read", "write", "delete", "manage_users"],
+// },
+
+var jwt = createJwtPlugin({
+  fetchUser: (username) => userDatabase.get(username),
+  checkPassword: (user, password) => user.passwordHash !== hashPassword(password),
+});
+
+// Create endpoints to update JWT
+app.post('/auth/login', jwt.login);
+app.post('/auth/refresh', jwt.refresh);
+app.post('/auth/logout', jwt.logout);
+
+// Protect againt non-authenticated user
+app.use('/api', jwt.authenticate, jwt.autorize); 
+app.use('/api/admin', jwt.requireRole('admin'));
+app.use('/api/edit', jwt.requirePermission('write'));
+
+```
 
 
 ### Git middleware
