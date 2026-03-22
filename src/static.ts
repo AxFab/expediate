@@ -154,7 +154,7 @@ const DEFAULT_OPTIONS: Omit<ResolvedOptions, 'root'> = {
 const HTTP = {
   /** 304 Not Modified — sent for conditional GET cache hits. */
   NOT_MODIFIED:       (res: RouterResponse, opts: ResolvedOptions) =>
-    res.status(304, opts.headers).end(),
+    { res.status(304, opts.headers).end() },
   /** 403 Forbidden — sent for denied dot-files or path traversal attempts. */
   FORBIDDEN:          (res: RouterResponse, opts: ResolvedOptions) =>
     res.status(403, opts.headers).send('Forbidden'),
@@ -167,7 +167,7 @@ const HTTP = {
    * Always includes an `Allow: GET, HEAD` header per RFC 7231 §6.5.5.
    */
   NOT_ALLOWED:        (res: RouterResponse, opts: ResolvedOptions) =>
-    res.status(405, { ...opts.headers, Allow: 'GET, HEAD' }).end(),
+    { res.status(405, { ...opts.headers, Allow: 'GET, HEAD' }).end() },
   /** 412 Precondition Failed — sent when `If-Match` / `If-Unmodified-Since` fails. */
   PRECONDITION_FAILS: (res: RouterResponse, opts: ResolvedOptions) =>
     res.status(412, opts.headers).send('Precondition Failed'),

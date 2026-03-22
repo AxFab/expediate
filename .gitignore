@@ -6,11 +6,14 @@
 
 node_modules/
 dist/
+
 !*.js
 !*.ts
 !*.html
+
 !package.json
 !.git*
+!*.md
 !.npm*
 
 !tests/fixtures/**/*

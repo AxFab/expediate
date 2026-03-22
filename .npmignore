@@ -5,10 +5,11 @@
 # ------------------------
 
 node_modules/
+src/
+tests/
 !*.js
+!*.map
 !*.ts
-!*.html
 !package.json
-!.git*
 !.npm*
-
+!README.md
