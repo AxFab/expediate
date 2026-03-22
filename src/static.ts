@@ -22,14 +22,35 @@
 
 import fs from 'fs';
 import nodePath from 'path';
-// mime v1 API: mime.lookup(path) → string | false, mime.charsets.lookup(type) → string | false
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const mime = require('mime') as {
-  lookup(path: string): string | false;
-  charsets: { lookup(type: string): string | false };
-};
 
 import type { RouterRequest, RouterResponse, Middleware } from './router';
+
+// ---------------------------------------------------------------------------
+// Mimetypes
+// ---------------------------------------------------------------------------
+export type Mime = {
+  lookup: (path: string, fallback: string | null) => string,
+  charsets: (mimeType: string) => string | null,
+}
+
+const mime_types = new Map<string, string>();
+const mime_extensions = new Map<string, string>();
+function mime_define(map:string[][]): void {
+  for (var type in map) {
+    var exts = map[type]!;
+    for (var i = 0; i < exts.length; i++)
+      mime_types.set(exts[i], type);
+    if (!mime_extensions.has(type))
+      mime_extensions.set(type, exts[0]);
+  }
+};
+
+export const mime: Mime = {
+  lookup: (path: string, fallback: string | null = null): string => mime_types.get(path.replace(/^.*[\.\/\\]/, '').toLowerCase()) ?? fallback ?? 'application/octet-stream',
+  charsets: (mimeType: string): string | null => (/^text\/|^application\/(javascript|json)/).test(mimeType) ? 'UTF-8' : null,
+};
+
+mime_define(require('./mimetypes.json'));
 
 // ---------------------------------------------------------------------------
 // Types
@@ -514,7 +535,7 @@ function writeIndexOf(
         continue; // skip entries that disappeared between readdir and stat
       }
 
-      const mimeType = mime.lookup(fullPath) || '';
+      const mimeType = mime.lookup(fullPath, '');
       const mediaType = mimeType.includes('/') ? mimeType.split('/')[0] : '';
       const alt  = stat.isDirectory() ? 'folder' : (mediaType || 'unknown');
       const icon = `/icons/${alt}.gif`;
@@ -603,9 +624,9 @@ function sendIt(
     if (opts.contentType) {
       res.setHeader('Content-Type', opts.contentType);
     } else {
-      const type = mime.lookup(pathname);
+      const type = mime.lookup(pathname, '');
       if (type) {
-        const charset = mime.charsets.lookup(type);
+        const charset = mime.charsets(type);
         res.setHeader('Content-Type', charset ? `${type}; charset=${charset}` : type);
       }
     }

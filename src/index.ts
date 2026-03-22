@@ -41,9 +41,10 @@ export type {
 
 // ── Static ────────────────────────────────────────────────────────────────────
 
-export { serveStatic, serveFile, sendFile } from './static';
+export { serveStatic, serveFile, sendFile, mime } from './static';
 export type { 
   StaticOptions,
+  Mime
 } from './static';
 
 // ── Miscallenous ──────────────────────────────────────────────────────────────

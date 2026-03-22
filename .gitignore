@@ -10,6 +10,7 @@ dist/
 !*.js
 !*.ts
 !*.html
+!src/*.json
 
 !package.json
 !.git*
