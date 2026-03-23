@@ -22,6 +22,10 @@
     "build": "tsc",
     "test": "node --import tsx --test 'tests/*.test.ts'"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AxFab/expediate"
+  },
   "author": "Fabien Bavent <fabien.bavent@gmail.com>",
   "contributors": [],
   "license": "MIT",
