@@ -328,9 +328,6 @@ describe('buildModule lifecycle', () => {
   });
 
   it('methods receive arguments correctly (arrow-function bug is fixed)', async () => {
-    // BUG FIX VERIFICATION: the original code used arrow functions to wrap
-    // methods, losing the `arguments` object. This test verifies that method
-    // arguments are forwarded correctly.
     const service: ServiceDefinition<any> = {
       data: () => ({}),
       methods: {

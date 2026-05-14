@@ -1,6 +1,6 @@
 {
   "name": "expediate",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Web framework to create complete HTTP server.",
   "main": "dist/index.js",
   "type": "commonjs",
@@ -24,13 +24,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/AxFab/expediate"
+    "url": "git+https://github.com/AxFab/expediate.git"
   },
   "author": "Fabien Bavent <fabien.bavent@gmail.com>",
   "contributors": [],
   "license": "MIT",
-  "dependencies": {
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^25.5.0",
     "typescript": "^5.9.3",

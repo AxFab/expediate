@@ -7,9 +7,10 @@
 node_modules/
 src/
 tests/
-!*.js
-!*.map
-!*.ts
+!dist/*.js
+!dist/*.json
+!dist/*.map
+!dist/*.ts
 !package.json
 !.npm*
 !README.md

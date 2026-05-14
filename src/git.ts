@@ -24,6 +24,7 @@ import { spawn }       from 'child_process';
 import { createGunzip } from 'zlib';
 
 import type { RouterRequest, RouterResponse } from './router.js';
+import { writeFileSync } from 'fs';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,6 +74,18 @@ export interface GitHandlerOptions {
   timeout?: number | string;
 }
 
+export interface GitCreateOption {
+  /**
+   * Directory that contains the `git-upload-pack` executable, including a
+   * trailing path separator (e.g. `'/usr/lib/git-core/'`).
+   *
+   * Leave empty (default) to locate the binary via the system `PATH`.
+   */
+  gitPath?: string;
+
+  description?: string;
+}
+
 // ---------------------------------------------------------------------------
 // PKT-LINE helpers
 // ---------------------------------------------------------------------------
@@ -97,11 +110,6 @@ export interface GitHandlerOptions {
  * ```
  */
 function pktLine(str: string): string {
-  // BUG FIX: the original used `str.length` (character count / UTF-16 code
-  // units) instead of the actual byte length. The Git PKT-LINE spec requires
-  // the 4-hex-digit prefix to represent the *byte* count of the whole frame
-  // (prefix + payload). For ASCII-only service names this difference is zero,
-  // but using Buffer.byteLength is correct and future-proof.
   const byteLen = Buffer.byteLength(str, 'utf8') + 4; // +4 for the 4-char hex prefix itself
   return byteLen.toString(16).padStart(4, '0') + str;
 }
@@ -131,13 +139,11 @@ const PKT_FLUSH = '0000';
  *
  * **Supported endpoints:**
  *
- * | Method | Path              | Purpose                                      |
- * |--------|-------------------|----------------------------------------------|
- * | GET    | `/info/refs`      | Smart HTTP capability advertisement          |
- * | POST   | `/git-upload-pack`| Pack-file negotiation and transfer           |
- *
- * Only `git-upload-pack` (fetch / clone) is implemented.
- * `git-receive-pack` (push) is intentionally excluded.
+ * | Method | Path               | Purpose                                      |
+ * |--------|--------------------|----------------------------------------------|
+ * | GET    | `/info/refs`       | Smart HTTP capability advertisement          |
+ * | POST   | `/git-upload-pack` | Pack-file negotiation and transfer           |
+ * | POST   | `/git-receive-pack`| Pack-file publish and transfer               |
  *
  * **Compression:** gzip-compressed POST bodies are transparently decompressed
  * before being piped to `git-upload-pack`.
@@ -150,7 +156,7 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
   if (typeof opt.repository !== 'function')
     throw new TypeError('gitHandler: opt.repository must be a function');
 
-  const gitBin = (opt.gitPath ?? '') + 'git-upload-pack';
+  const gitHome = opt.gitPath ?? '';
 
   return (req: RouterRequest, res: RouterResponse): void => {
     // Resolve the repository path for this request.
@@ -160,49 +166,47 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
 
     const urlPath = req.path; // sub-path after the mount prefix
 
-    // ── GET /info/refs?service=git-upload-pack ──────────────────────────
+    // ── GET /info/refs?service=git-xxxxxx-pack ──────────────────────────
     if (req.method === 'GET' && urlPath === '/info/refs') {
-      // BUG FIX: `req.queries.url` can be undefined when no query parameters
-      // are present, causing `req.queries.url.service` to throw a TypeError.
-      const service = req.queries?.url?.service;
 
-      if (service !== 'git-upload-pack')
-        return void res.status(403).send('Only git-upload-pack is supported');
+      let args = [];
+      const service = req.queries?.url?.service;
+      if (service === 'git-upload-pack')
+        args = buildArgs(opt, ['--stateless-rpc', '--advertise-refs', gitDirectory]);
+      else if (service === 'git-receive-pack')
+        args = [gitDirectory]
+      else
+        return void res.status(403).send(`Service ${service} is not supported`);
 
       res.setHeader('Content-Type', `application/x-${service}-advertisement`);
       res.setHeader('Cache-Control', 'no-cache');
-
       // The Smart HTTP advertisement starts with a PKT-LINE service banner
       // followed by a flush packet (0000), then the git-upload-pack output.
       res.write(pktLine(`# service=${service}\n`));
       res.write(PKT_FLUSH);
 
-      const args = buildArgs(opt, ['--stateless-rpc', '--advertise-refs', gitDirectory]);
-      const proc = spawn(gitBin, args, {
+      const proc = spawn(gitHome + service, args, {
         env: { ...process.env, GIT_PROTOCOL: (req.headers['git-protocol'] as string) || '' },
       });
 
-      // BUG FIX: the original did not listen for spawn errors (e.g. ENOENT
-      // when git is not installed). Without this handler, a missing binary
-      // causes an uncaught exception that crashes the server process.
       proc.on('error', (err) => {
-        console.error('[git-upload-pack refs] spawn error:', err.message);
-        if (!res.writableEnded) res.status(500).send(`git-upload-pack unavailable: ${err.message}`);
+        console.error(`[${service} GET] spawn error:`, err.message);
+        if (!res.writableEnded) res.status(500).send(`${service} unavailable: ${err.message}`);
       });
 
       proc.stdout.pipe(res);
       proc.stdout.on('error', (err) => {
-        console.warn('[git-upload-pack refs] stdout error:', err.message);
+        console.warn(`[${service} GET] stdout error:`, err.message);
       });
 
       proc.stderr.on('data', (d: Buffer) =>
-        console.error('[git-upload-pack refs]', d.toString()),
+        console.error(`[${service} GET]`, d.toString()),
       );
 
       proc.on('close', (code) => {
         if (code !== 0) {
-          console.error(`[git-upload-pack refs] exited with code ${code}`);
-          if (!res.writableEnded) res.status(500).send('git-upload-pack failed');
+          console.error(`[${service} GET] exited with code ${code}`);
+          if (!res.writableEnded) res.status(500).send(`${service} failed`);
         }
         // When code === 0, proc.stdout has already piped all data and called
         // res.end() automatically (default pipe behaviour).
@@ -211,30 +215,32 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
       return;
     }
 
-    // ── POST /git-upload-pack ───────────────────────────────────────────
-    if (req.method === 'POST' && urlPath === '/git-upload-pack') {
+    // ── POST /git-upload-pack or /git-receive-pack ──────────────────────
+    if (req.method === 'POST' && (urlPath === '/git-upload-pack' || urlPath === '/git-receive-pack')) {
       const contentType = (req.headers['content-type'] as string) || '';
+      const service = urlPath.substring(1);
 
-      // BUG FIX: the original called `res.send(415).send(...)`. Our router's
-      // `res.send()` signature is `send(body?)` — passing 415 as the body
-      // writes the number as a string, then the chained `.send()` fails
-      // because `res.send()` already ended the response. Corrected to
-      // `res.status(415).send(...)`.
-      if (contentType !== 'application/x-git-upload-pack-request')
+      if (contentType !== `application/x-${service}-request`)
         return void res.status(415).send('Unsupported Media Type');
 
-      res.setHeader('Content-Type', 'application/x-git-upload-pack-result');
+      let args = [];
+      if (service === 'git-upload-pack')
+        args = buildArgs(opt, ['--stateless-rpc', gitDirectory]);
+      else if (service === 'git-receive-pack')
+        args = [gitDirectory]
+      else
+        return void res.status(403).send(`Service ${service} is not supported`);
+
+      res.setHeader('Content-Type', `application/x-${service}-result`);
       res.setHeader('Cache-Control', 'no-cache');
 
-      const args = buildArgs(opt, ['--stateless-rpc', gitDirectory]);
-      const proc = spawn(gitBin, args, {
+      const proc = spawn(gitHome + service, args, {
         env: { ...process.env, GIT_PROTOCOL: (req.headers['git-protocol'] as string) || '' },
       });
 
-      // BUG FIX: same missing spawn-error handler as the GET branch.
       proc.on('error', (err) => {
-        console.error('[git-upload-pack pack] spawn error:', err.message);
-        if (!res.writableEnded) res.status(500).send(`git-upload-pack unavailable: ${err.message}`);
+        console.error(`[${service} POST] spawn error:`, err.message);
+        if (!res.writableEnded) res.status(500).send(`${service} unavailable: ${err.message}`);
       });
 
       // Transparently decompress gzip-encoded request bodies.
@@ -242,7 +248,7 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
       if (encoding === 'gzip') {
         const gunzip = createGunzip();
         gunzip.on('error', (err) => {
-          console.warn('[git-upload-pack pack] gunzip error:', err.message);
+          console.warn(`[${service} POST] gunzip error:`, err.message);
           if (!res.writableEnded) res.status(400).send('Failed to decompress request body');
         });
         (req as any).pipe(gunzip).pipe(proc.stdin);
@@ -252,20 +258,17 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
 
       proc.stdout.pipe(res);
       proc.stdout.on('error', (err) => {
-        console.warn('[git-upload-pack pack] stdout error:', err.message);
+        console.warn(`[${service} POST] stdout error:`, err.message);
       });
 
-      // BUG FIX: the original tagged the POST stderr with the same label as
-      // the GET branch ('[git-upload-pack refs]'), making log messages from
-      // the two branches indistinguishable. Corrected to '[git-upload-pack pack]'.
       proc.stderr.on('data', (d: Buffer) =>
-        console.error('[git-upload-pack pack]', d.toString()),
+        console.error(`[${service} POST]`, d.toString()),
       );
 
       proc.on('close', (code) => {
         if (code !== 0) {
-          console.error(`[git-upload-pack pack] exited with code ${code}`);
-          if (!res.writableEnded) res.status(500).send('git-upload-pack failed');
+          console.error(`[${service} POST] exited with code ${code}`);
+          if (!res.writableEnded) res.status(500).send(`${service} failed`);
         }
       });
 
@@ -273,7 +276,7 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
         // EPIPE is expected when the client disconnects mid-stream; it is not
         // a server-side fault and does not require an error response.
         if (err.code !== 'EPIPE')
-          console.warn('[git-upload-pack pack] stdin error:', err.message);
+          console.warn(`[${service} POST] stdin error:`, err.message);
       });
 
       return;
@@ -282,6 +285,47 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
     // Unrecognised path inside the repository mount.
     res.status(404).send('Not found');
   };
+}
+
+/**
+ *
+ * @param gitDirectory
+ * @param opt
+ * @returns
+ */
+export function getCreate(gitDirectory:string, opt:GitCreateOption): Promise<void> {
+
+  return new Promise((resolve, reject) => {
+
+    const gitHome = opt.gitPath ?? '';
+    const args = ['init', '--bare', gitDirectory];
+    const proc = spawn(gitHome + 'git', args, {
+      env: { ...process.env, },
+    });
+
+    proc.on('error', (err) => {
+      console.error(`[git init] spawn error:`, err.message);
+      reject(`git unavailable: ${err.message}`)
+    });
+
+    proc.stdout.on('error', (err) => {
+      console.warn(`[git init] stdout error:`, err.message);
+    });
+
+    proc.stderr.on('data', (d: Buffer) =>
+      console.error(`[git init]`, d.toString()),
+    );
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        return reject(`git failed`)
+      }
+      if (opt.description)
+        writeFileSync(`${gitDirectory}/description`, opt.description);
+      resolve();
+    });
+
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -304,19 +348,11 @@ function buildArgs(opt: GitHandlerOptions, trailing: string[]): string[] {
   const args: string[] = [];
 
   if (opt.timeout) {
-    // BUG FIX: `parseInt` without an explicit radix may misinterpret strings
-    // that start with '0' as octal in some environments. Always pass base 10.
     const seconds = parseInt(String(opt.timeout), 10);
     if (!isNaN(seconds) && seconds > 0)
       args.push(`--timeout=${seconds}`);
   }
 
-  // BUG FIX: the original used `opt.bareOnly ? '--strict' : '--no-strict'`.
-  // `git-upload-pack` does not accept `--strict` — that flag belongs to
-  // `git-receive-pack`. The correct option for upload-pack is `--no-strict`
-  // (which relaxes the requirement that the path must be a bare repository).
-  // When the caller sets `strict: true` we simply omit `--no-strict`; when
-  // `strict` is false (default) we pass `--no-strict` to allow non-bare repos.
   if (!opt.strict)
     args.push('--no-strict');
 

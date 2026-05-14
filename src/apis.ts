@@ -196,7 +196,6 @@ function buildModule<TInstance extends ServiceInstance>(
     : ({ $key: key } as unknown as TInstance);
 
   // Mix service methods into the instance, bound to `this = instance`.
-  // BUG FIX: the original used arrow functions `() => method.apply(module, arguments)`.
   // Arrow functions do NOT have their own `arguments` object — they inherit it
   // from the enclosing `buildModule` scope (which holds `(service, key)`).
   // Any arguments forwarded to the method were therefore silently dropped.
@@ -245,8 +244,6 @@ function resolveInstance<TInstance extends ServiceInstance>(
     return modules['singleton'];
   }
 
-  // BUG FIX: the original called `service.key(req)` which does not exist on
-  // the service definition. The correct method is `service.scope(req)`.
   const key = service.scope(req);
 
   if (key === null) {
@@ -272,9 +269,6 @@ function resolveInstance<TInstance extends ServiceInstance>(
  * @param data - Any JSON-serialisable value.
  */
 function sendJson(res: RouterResponse, data: unknown): void {
-  // BUG FIX: the original called `res.send(JSON.stringify(val))` without
-  // setting a `Content-Type` header. Clients had no way to detect that the
-  // response body was JSON. Corrected by setting the header explicitly.
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.send(JSON.stringify(data));
 }
@@ -346,8 +340,6 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
 
   // Pre-build the singleton instance eagerly so `setup()` runs at startup.
   if (typeof service.scope !== 'function')
-    // BUG FIX: the original called `buildModule(service)` without a key,
-    // passing `undefined` to `data()` and leaving `$key` as `undefined`.
     // Corrected to pass `'singleton'` as the canonical key.
     modules['singleton'] = buildModule(service, 'singleton');
 

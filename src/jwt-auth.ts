@@ -249,9 +249,6 @@ const DEFAULT_CONFIG: JwtConfig = {
   username:    (user) => user.username,
   fetchUser:   (username) => userDatabase.get(username),
 
-  // BUG FIX: the original callback was named `checkPassword` and returned
-  // `true` when the password was WRONG (inverted logic). Renamed to
-  // `isPasswordValid` and inverted so it returns `true` on a match.
   isPasswordValid: (user, password) => user.passwordHash === hashPassword(password),
 
   payload: (user) => ({
@@ -319,10 +316,6 @@ function createSignature(
   secret:         string,
   alg:            JwtAlgorithm,
 ): string {
-  // BUG FIX: the original code called `header.alg` where `header` was already
-  // a Base64URL *string*, not a decoded object. Accessing `.alg` on a string
-  // always returns `undefined`, causing every signature to fail. The algorithm
-  // is now passed explicitly as a parameter instead of being read from the header.
   const shaVariant = `sha${alg.substring(2)}`; // 'sha256', 'sha384', 'sha512'
   return crypto
     .createHmac(shaVariant, secret)
@@ -384,20 +377,12 @@ function verifyToken(token: string, secret: string, alg: JwtAlgorithm): VerifyRe
 
     const [encodedHeader, encodedPayload, signature] = parts;
 
-    // BUG FIX: the original code accessed `header.alg` where `header` is a
-    // Base64URL *string*. `.alg` on a string is always `undefined`, so the
-    // algorithm check always failed and every token was rejected. The header
-    // must be decoded first.
     const decodedHeader = base64UrlDecode(encodedHeader) as { alg?: string; typ?: string };
     if (decodedHeader.alg !== alg)
       return { valid: false, error: 'Unauthorised signing algorithm' };
 
     const expectedSig = createSignature(encodedHeader, encodedPayload, secret, alg);
 
-    // BUG FIX: `timingSafeEqual` requires both Buffers to have the same
-    // length. When a forged token has a signature of a different length,
-    // Node throws a RangeError instead of returning `false`. Guard against
-    // this by checking lengths before calling timingSafeEqual.
     const sigBuf      = Buffer.from(signature);
     const expectedBuf = Buffer.from(expectedSig);
     if (
@@ -448,9 +433,6 @@ function authenticateUser(username: string, password: string, config: JwtConfig)
   const user = config.fetchUser(username);
   if (!user) return { success: false, error: 'User not found' };
 
-  // BUG FIX: the original used `checkPassword` which returned `true` when
-  // the password was WRONG (negated logic). `isPasswordValid` returns `true`
-  // when the password is correct.
   if (!config.isPasswordValid(user, password))
     return { success: false, error: 'Incorrect password' };
 
@@ -542,10 +524,6 @@ function renewAccessToken(username: string, refreshToken: string, config: JwtCon
  *          already absent.
  */
 function revokeRefreshToken(refreshToken: string, config: JwtConfig): boolean {
-  // BUG FIX: the original function referenced `config` as a free variable but
-  // `config` only exists inside `createJwtPlugin`. The function was declared
-  // at module level and crashed with a ReferenceError at runtime. `config` is
-  // now a required parameter.
   const existed = config.refreshTokenStore.has(refreshToken);
   config.refreshTokenStore.delete(refreshToken);
   return existed;
@@ -677,12 +655,6 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
   /**
    * Token-renewal handler.  Reads `{ username, refreshToken }` from
    * `req.body`.
-   *
-   * BUG FIX: the original accepted a renewal request without `username`,
-   * allowing `renewAccessToken(undefined, token, config)` to be called.
-   * Because `tokenData.username !== undefined` is always `true` for any real
-   * token, any holder of a refresh token could silently impersonate its owner.
-   * `username` is now validated as a required field.
    */
   const refresh: Middleware = (req: RouterRequest, res: RouterResponse): void => {
     const { username, refreshToken } = (req as any).body ?? {};
@@ -719,9 +691,6 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
     const { refreshToken } = (req as any).body ?? {};
 
     if (refreshToken) {
-      // BUG FIX: the original called `revokeRefreshToken(refreshToken)` without
-      // passing `config`, which caused a ReferenceError because `config` is a
-      // local variable inside `createJwtPlugin`.
       revokeRefreshToken(refreshToken, config);
     }
 
@@ -752,9 +721,6 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
     const result = verifyToken(token, config.accessTokenSecret, config.alg);
     if (!result.valid) return next();
 
-    // BUG FIX: the original compared `result.payload` (an object) to
-    // `config.issuer` (a string) with `!=`, which is always `true`, causing
-    // every token to be rejected when `checkIssuer` was enabled.
     // The correct check reads the `iss` claim from the decoded payload.
     if (config.checkIssuer && result.payload.iss !== config.issuer) return next();
 
@@ -785,9 +751,6 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
    *
    * Responds with 401 when unauthenticated, 403 when none of the required
    * roles are present.
-   *
-   * BUG FIX: the original accessed `req.user.roles` without first checking
-   * that `req.user` exists, throwing a TypeError for unauthenticated requests.
    */
   function requireRole(...roles: string[]): Middleware[] {
     return [
@@ -819,8 +782,6 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
    * **all** of the specified permissions.
    *
    * Responds with 401 when unauthenticated, 403 when any permission is absent.
-   *
-   * BUG FIX: same `req.user` undefined-access issue as `requireRole`.
    */
   function requirePermission(...permissions: string[]): Middleware[] {
     return [

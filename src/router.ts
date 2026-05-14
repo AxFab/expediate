@@ -22,6 +22,7 @@
 
 import * as http from 'http';
 import * as https from 'https';
+import { BodyOptions, extractCharset, readReqBody } from './misc';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,6 +63,9 @@ interface RouterRequest extends http.IncomingMessage {
   };
   /** Parsed cookies sent with the request. */
   cookies: StringMap;
+
+
+  json (opts?: BodyOptions):Promise<unknown|null>;
 }
 
 /**
@@ -74,6 +78,9 @@ interface RouterResponse extends http.ServerResponse {
    * Equivalent to `res.write(data); res.end()`.
    */
   send(data?: string): void;
+
+
+  json (data: unknown):void;
   /**
    * Set the HTTP status code and optional response headers, then return
    * `this` so calls can be chained (e.g. `res.status(404).end(...)`).
@@ -461,10 +468,36 @@ function updateHttpObjects(
     }
   }
 
+  rReq.json = (opts?: BodyOptions):Promise<unknown|null> => {
+    return new Promise((resolve, reject) => {
+      readReqBody(rReq, { limit: opts?.limit ?? '100kb', inflate: opts?.inflate ?? true, reviver: null, strict: false }, 'application/json')
+        .then(ret => {
+          if (ret == null)
+            return resolve(null)
+          const charset = extractCharset(ret.mimetype);
+          try {
+            (rReq as any).body = JSON.parse(
+              ret.content.toString(charset as BufferEncoding),
+              opts?.reviver ?? undefined,
+            );
+            return resolve((rReq as any).body)
+          } catch (ex) {
+            reject({ status: 500, message: (ex as Error).message });
+          }
+        })
+        .catch(err => reject(err))
+    })
+  }
+
   rRes.setHeader('X-Powered-By', 'Expediate');
 
   rRes.send = (data?: string): void => {
     if (data) res.write(data);
+    res.end();
+  };
+
+  rRes.json = (data: unknown): void => {
+    res.write(JSON.stringify(data));
     res.end();
   };
 

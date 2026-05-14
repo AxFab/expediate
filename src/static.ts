@@ -149,7 +149,7 @@ const UP_PATH_REGEXP = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
 /** Default security and caching options applied to every response. */
 const DEFAULT_OPTIONS: Omit<ResolvedOptions, 'root'> = {
   headers: {
-    'Content-Security-Policy': "default-src 'none'",
+    'Content-Security-Policy': "default-src 'self'",
     'X-Content-Type-Options': 'nosniff',
   },
   fallthrough: false,
@@ -351,9 +351,6 @@ function conditionMatch(
   }
 
   // --- If-Unmodified-Since ---
-  // BUG FIX: the original code read req['if-modified-since'] here, which is
-  // the wrong header. The correct header for this precondition is
-  // 'if-unmodified-since'.
   const lastModified   = parseHttpDate(resHeaders['last-modified'] as string | undefined);
   const unmodifiedSince = parseHttpDate(reqHeaders['if-unmodified-since'] as string | undefined);
   if (!isNaN(unmodifiedSince) && !isNaN(lastModified))
@@ -494,11 +491,6 @@ function writeIndexOf(
   parentUrlPath: string | null,
   callback:      IndexCallback,
 ): void {
-  // BUG FIX: the original signature had a `queries` parameter as first arg and
-  // a `path` parameter (shadowing the `path` module) as second. Both were
-  // unused or misused. The signature is corrected here: `urlPath` is the
-  // display path, `directoryPath` is the fs path, `parentUrlPath` is optional.
-
   fs.readdir(directoryPath, (err, files) => {
     if (err) return callback(null, err);
 
@@ -523,10 +515,6 @@ function writeIndexOf(
         + `</tr>\n`;
 
     for (const file of files) {
-      // BUG FIX: the original code passed `pathname` (undefined in this scope)
-      // to mime.lookup(). The correct argument is the full path of the entry.
-      // BUG FIX: the original code used `path.join(...)` where `path` was
-      // shadowed by the parameter name. Use `nodePath` (the imported module).
       const fullPath = nodePath.join(directoryPath, file);
       let stat: fs.Stats;
       try {
@@ -540,14 +528,12 @@ function writeIndexOf(
       const alt  = stat.isDirectory() ? 'folder' : (mediaType || 'unknown');
       const icon = `/icons/${alt}.gif`;
       const name = file + (stat.isDirectory() ? '/' : '');
-      // BUG FIX: `stat.modified` does not exist on `fs.Stats`.
-      // The correct property is `stat.mtime`.
       const modified = stat.mtime.toUTCString();
       const size     = stat.isDirectory() ? '-' : String(stat.size);
 
       html += `<tr>`
         + `<td valign="top"><img src="${icon}" alt="[${alt.toUpperCase()}]"></td>`
-        + `<td><a href="${name}">${name}</a></td>`  // BUG FIX: link text was empty in original
+        + `<td><a href="${name}">${name}</a></td>`
         + `<td align="right">${modified}</td>`
         + `<td align="right">${size}</td>`
         + `<td>&nbsp;</td>`
@@ -557,9 +543,6 @@ function writeIndexOf(
     html += '<tr><th colspan="5"><hr></th></tr>\n';
     html += '</table><address>Expediate/1.0.0</address></body></html>\n';
 
-    // BUG FIX: the original code called go(html) without `return`, so execution
-    // continued to HTTP.NOT_FOUND immediately after — the callback was invoked
-    // and then the caller would also receive NOT_FOUND.
     return callback(html, null);
   });
 }
@@ -739,9 +722,6 @@ export function sendFile(
         return writeIndexOf(req.path, pathname, parentUrl, (html, indexErr) => {
           if (indexErr)
             return HTTP.INTERNAL_ERROR(res, opts, indexErr.code ?? 'UNKNOWN');
-          // BUG FIX: the original code called `res.send(200, {...}).send(html)`.
-          // `res.send()` does not accept a status code as first argument; the
-          // correct call is `res.status(200, headers).send(html)`.
           return res.status(200, opts.headers).send(html!);
         });
       }
@@ -783,14 +763,11 @@ export function sendFile(
  * @throws {TypeError} When `root` is missing or not a string.
  */
 export function serveStatic(root: string, options?: StaticOptions): Middleware {
-  // BUG FIX: `static` is a reserved word in strict mode (`'use strict'`).
-  // The function has been renamed to `serveStatic`.
-
   const opts = resolveOptions(root, options);
 
   return function (req: RouterRequest, res: RouterResponse, next: () => void): void {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      if (opts.fallthrough) 
+      if (opts.fallthrough)
         return next();
       return HTTP.NOT_ALLOWED(res, opts);
     }
@@ -812,12 +789,8 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
     pathname = nodePath.resolve(nodePath.normalize(`${opts.root}/${pathname}`));
 
     // Dot-file handling.
-    // BUG FIX: the original condition was `!opts.dotfiles != 'allow'` which
-    // always evaluates to `true` because `!opts.dotfiles` is a boolean and a
-    // boolean is never strictly/loosely equal to a string. The correct
-    // condition is `opts.dotfiles !== 'allow'`.
     if (opts.dotfiles !== 'allow' && pathname.includes('/.')) {
-      if (opts.dotfiles === 'deny') 
+      if (opts.dotfiles === 'deny')
         return HTTP.FORBIDDEN(res, opts);
       return HTTP.NOT_FOUND(res, opts);
     }
@@ -829,7 +802,7 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
           err.code === 'ENAMETOOLONG' ||
           err.code === 'ENOTDIR'
         ) {
-          if (opts.fallthrough) 
+          if (opts.fallthrough)
             return next();
           return HTTP.NOT_FOUND(res, opts);
         }
@@ -838,8 +811,11 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
 
       // When the resolved path is a directory, redirect to its index.html.
       if (stat.isDirectory()) {
-        if (!opts.redirect) 
+        if (!opts.redirect) {
+          if (opts.fallthrough)
+            return next();
           return HTTP.NOT_FOUND(res, opts);
+        }
         return sendFile(req, res, nodePath.join(pathname, 'index.html'), opts);
       }
 
@@ -873,12 +849,8 @@ export function serveFile(filePath: string, options?: StaticOptions): Middleware
   const opts = resolveOptions(filePath, options);
 
   return function (req: RouterRequest, res: RouterResponse, next: () => void): void {
-    // BUG FIX: the original `file()` function had the method-check logic
-    // inverted. `methOk` was set to `true` when the method was NOT GET/HEAD
-    // (i.e. the invalid case), and then `if (!methOk)` blocked valid methods.
-    // The corrected logic: reject when the method is NOT GET or HEAD.
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      if (opts.fallthrough) 
+      if (opts.fallthrough)
         return next();
       return HTTP.NOT_ALLOWED(res, opts);
     }
@@ -888,11 +860,6 @@ export function serveFile(filePath: string, options?: StaticOptions): Middleware
       if (err)
         return HTTP.INTERNAL_ERROR(res, opts, err.code ?? 'UNKNOWN');
 
-      // BUG FIX: the original code referenced `err.code` inside the
-      // `stat.isDirectory()` branch, where `err` is guaranteed to be `null`
-      // (we only reach this branch when `fs.stat` succeeded). The correct
-      // response for a misconfigured directory path is a plain 500 with a
-      // descriptive message.
       if (stat.isDirectory())
         return HTTP.INTERNAL_ERROR(res, opts, 'EISDIR');
 

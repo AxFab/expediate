@@ -81,13 +81,13 @@ export interface LoggerOptions {
    * a non-trivial memory cost in production.
    * Defaults to `false`.
    */
-  track?: boolean;
+  track: boolean;
   /**
    * Timeout in milliseconds before a tracked request is considered lost.
    * Only used when {@link track} is `true`.
    * Defaults to `30 000` ms (30 seconds).
    */
-  trackTimeout?: number;
+  trackTimeout: number;
   /**
    * Extract a user identity string from the request for inclusion in the log
    * line.  Receives the augmented `RouterRequest` and should return a short
@@ -99,25 +99,29 @@ export interface LoggerOptions {
    * user: (req) => (req as any).authUser ?? '-'
    * ```
    */
-  user?: (req: RouterRequest) => string;
+  user: (req: RouterRequest) => string;
   /**
    * BCP 47 locale tag used when formatting the request timestamp.
    * Passed as the first argument to `Intl.DateTimeFormat`.
    * Defaults to `'en-GB'`.
    */
-  locale?: string;
+  locale: string;
   /**
    * Date/time format options passed as the second argument to
    * `Intl.DateTimeFormat`.  Override this to change which fields are shown in
    * the timestamp.
    * Defaults to `{ month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }`.
    */
-  dateFormat?: Intl.DateTimeFormatOptions;
+  dateFormat: Intl.DateTimeFormatOptions;
+  /**
+   *
+   */
+  json: boolean,
   /**
    * Custom logging function.  Receives the fully-formatted log line as a
    * single string.  Defaults to `console.log`.
    */
-  logger?: (msg: string) => void;
+  logger: (msg: string|object) => void;
 }
 
 /**
@@ -218,10 +222,7 @@ function splitBuffer(buffer: Buffer, delimiter: Buffer): Buffer[] {
  *                      (e.g. `'text/plain; charset=iso-8859-1'`).
  * @returns A Node.js-compatible encoding name (e.g. `'utf8'`, `'iso-8859-1'`).
  */
-function extractCharset(contentType: string): string {
-  // BUG FIX: the original regex `'s+$` was a literal quote followed by `s+$`
-  // instead of `\s+$`. The trim therefore left leading/trailing whitespace on
-  // every parameter, breaking charset detection. Corrected to `\s+$`.
+export function extractCharset(contentType: string): string {
   const param = contentType
     .split(';')
     .map((s) => s.replace(/^\s+|\s+$/g, ''))
@@ -264,9 +265,6 @@ function readBody(
   next:     () => void,
   callback: (contentType: string, body: Buffer) => void,
 ): void {
-  // BUG FIX: HTTP/1.1 header names are always lowercased by Node.js.
-  // The original code used mixed-case keys ('Content-Length', 'Content-Encoding',
-  // 'Content-Type') which always evaluated to undefined.
 
   const length = parseInt((req.headers['content-length'] as string) ?? '0', 10);
 
@@ -298,10 +296,6 @@ function readBody(
   req.on('data', (chunk: Buffer) => {
     if (data === null) return; // already aborted
 
-    // BUG FIX: the size check must happen AFTER concatenating the new chunk,
-    // not before. Checking before allowed a stream of (maxLength-1)-byte chunks
-    // to bypass the limit entirely.
-    // BUG FIX: the original code referenced `chink` (typo) instead of `chunk`.
     const next_ = Buffer.concat([data, chunk]);
     if (next_.length > maxLength) {
       data = null;
@@ -321,6 +315,69 @@ function readBody(
       callback(contentType, decompressed as Buffer);
     });
   });
+}
+
+
+export type BodyContent = {
+  mimetype : string,
+  content: Buffer,
+}
+// TODO
+export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimetype: string | null,):Promise<BodyContent|null> {
+
+  return new Promise((resolve, reject) => {
+
+    const length = parseInt((req.headers['content-length'] as string) ?? '0', 10);
+
+    // No body declared
+    if (!length || length === 0) return resolve(null);
+
+    const maxLength = readSize(opts.limit) || 102_400;
+
+    if (length > maxLength)
+      return reject({ status: 413, message: 'Content Too Large' });
+
+    // Compression handling.
+    const encoding = req.headers['content-encoding'] as string | undefined;
+    if (encoding && (opts.inflate === false || !DECOMPRESS_ALGO[encoding]))
+      return reject({ status: 415, message: 'Unsupported Media Type: Wrong Content-Encoding' });
+
+    // eslint-disable-next-line @typescript-eslint/ban-types
+    const decompress =
+      (encoding ? DECOMPRESS_ALGO[encoding] : undefined) ?? ((d: Buffer, c: zlib.CompressCallback) => c(null, d as any));
+
+    // Content-Type validation.
+    const contentType = (req.headers['content-type'] as string) ?? '';
+    if (mimetype && contentType.split(';')[0].trim() !== mimetype)
+      return reject({ status:415, message: 'Unsupported Media Type: Wrong Content-Type' });
+
+    // Stream collection.
+    let data: Buffer | null = Buffer.alloc(0);
+
+    req.on('data', (chunk: Buffer) => {
+      if (data === null) return; // already aborted
+
+      const next_ = Buffer.concat([data, chunk]);
+      if (next_.length > maxLength) {
+        data = null;
+        reject({ status: 413, message: 'Content Too Large' });
+        return;
+      }
+      data = next_;
+    });
+
+    req.on('end', () => {
+      if (data === null) return; // aborted during streaming
+
+      // zlib types require NonSharedBuffer; Buffer satisfies this at runtime.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      decompress(data as any, (err, decompressed) => {
+        if (err) return reject({ status: 500, message: err.message });
+        resolve({ mimetype: contentType ?? '', content: decompressed as Buffer });
+      });
+    });
+
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +482,6 @@ function readBodyAsFormData(
   contentType: string,
   data:        Buffer,
 ): void {
-  // BUG FIX: the original regex used `'s+$` (literal quote) instead of `\s+$`.
   const boundary = contentType
     .split(';')
     .map((s) => s.replace(/^\s+|\s+$/g, ''))
@@ -440,7 +496,6 @@ function readBodyAsFormData(
     // \r\n--boundary.  We split on this sequence so every resulting slice is
     // the raw content of one part (headers + blank line + body), without any
     // leading delimiter bytes.
-    // BUG FIX: the original code passed `buffer` (undefined) instead of `data`.
     const delimiter = Buffer.from(`\r\n--${boundary}`);
 
     // Prepend \r\n so the very first part is also cleanly split.
@@ -451,9 +506,6 @@ function readBodyAsFormData(
 
     for (const part of rawParts) {
       // The closing delimiter ends with '--'; skip it.
-      // BUG FIX: the original check `buf.length == 2 && buf.toString() == '--'`
-      // was incorrect. After splitting on \r\n--boundary, the terminal entry
-      // is '--\r\n' (or just '--'), not a 2-byte '--'. Use startsWith.
       if (part.toString('utf8', 0, 2) === '--') continue;
 
       // Each part begins with \r\n (from after the delimiter), then headers,
@@ -679,7 +731,7 @@ const ANSI_RESET = '\x1b[0m';
  * }));
  * ```
  */
-export function logger(opts?: LoggerOptions): Middleware {
+export function logger(opts?: Partial<LoggerOptions>): Middleware {
   const options = opts ?? {};
   const log = options.logger ?? console.log;
 
@@ -715,20 +767,87 @@ export function logger(opts?: LoggerOptions): Middleware {
     res.on('finish', () => {
       if (tracker !== null) clearTimeout(tracker);
 
+      const host = req.headers.host;
       const elapsed = Date.now() - receivedAt;
-      // BUG FIX: Math.floor is more explicit and correct than parseInt for
-      // integer division. Both work, but parseInt(200/100) has a subtle
-      // coercion to string first. Math.floor is semantically clearer.
       const statusClass = Math.floor(res.statusCode / 100);
       const colour      = STATUS_COLORS[statusClass] ?? STATUS_COLORS[0];
       const statusStr   = `${colour}${res.statusCode}${ANSI_RESET}`;
       const contentLen  = res.getHeader('content-length') ?? '-';
 
-      log(`${timestamp} ${statusStr} ${req.method} ${requestPath} ${ip} <${user}> ${elapsed}ms (${contentLen})`);
+      if (options.json === true)
+        log({
+          timestamp,
+          status: res.statusCode,
+          method: req.method,
+          path: requestPath,
+          ip,
+          user,
+          elapsed,
+          host,
+          length: contentLen,
+        })
+      else
+        log(`${timestamp} ${statusStr} ${req.method} ${requestPath} ${ip} <${user}> ${elapsed}ms (${contentLen})`);
     });
 
     next();
   };
 }
 
-export default { json, formData, parseBody, logger };
+
+// ---------------------------------------------------------------------------
+// Cors middleware
+// ---------------------------------------------------------------------------
+
+export type CorsOptions = {
+  origin: string | string[],
+  allowHeaders: string | string[],
+  allowMethods: string | string[],
+  allowCredentials: boolean | undefined
+  maxAge: number | undefined,
+  vary: string | string[] | undefined,
+  optionsStatus: number,
+  preflight: ((req: RouterRequest) => boolean) | undefined
+}
+
+export function cors(opts?: Partial<CorsOptions>): Middleware {
+  const options:CorsOptions = {
+    origin: opts?.origin || '*',
+    allowHeaders: opts?.allowHeaders || 'Accept, Content-Type, Authorization',
+    allowMethods: opts?.allowMethods || 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    allowCredentials: opts?.allowCredentials,
+    maxAge: opts?.maxAge,
+    vary: opts?.vary,
+    optionsStatus: opts?.optionsStatus || 204,
+    preflight: opts?.preflight,
+  };
+
+  return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
+    if (options.preflight && !options.preflight(req))
+    {
+      res.status(req.method == 'OPTIONS' ? 403 : 400).end()
+      return
+    }
+    if (req.headers.origin) {
+      res.setHeader('Access-Control-Allow-Origin', options.origin);
+      if (options.vary !== undefined)
+        res.setHeader('Vary', options.vary)
+    }
+    if (req.method == 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Headers', options.allowHeaders)
+      res.setHeader('Access-Control-Allow-Methods', options.allowMethods)
+      if (options.allowCredentials !== undefined)
+        res.setHeader('Access-Control-Allow-Credentials', options.allowCredentials ? 'true' : 'false')
+      if (options.maxAge !== undefined)
+        res.setHeader('Access-Control-Max-Age', options.maxAge.toFixed(0))
+
+      res.status(options.optionsStatus).end()
+
+      return;
+    }
+    next();
+  };
+}
+
+
+export default { json, formData, parseBody, logger, cors };
