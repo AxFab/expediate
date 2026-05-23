@@ -30,5 +30,6 @@
 ## Others
 
 - [Api builder](mdlw/api)
+- [Api openapi description](mdlw/openapi)
 - [Git Smart HTTP](mdlw/git-handler)
 - [JWT authentication plugin](mdlw/jwt-plugin)

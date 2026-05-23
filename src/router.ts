@@ -27,7 +27,7 @@ import * as https  from 'https';
 import * as http2  from 'http2';
 import * as net    from 'net';
 import * as path   from 'path';
-import { BodyOptions, FormPart, parseMultipartBody, extractCharset, readReqBody } from './misc';
+import { BodyOptions, FormPart, parseMultipartBody, extractCharset, readReqBody } from './misc.js';
 import { serveFile } from './static.js';
 
 // ---------------------------------------------------------------------------

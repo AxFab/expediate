@@ -35,6 +35,8 @@
     // "noPropertyAccessFromIndexSignature": true,
 
     // Recommended Options
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
     "verbatimModuleSyntax": false,
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,

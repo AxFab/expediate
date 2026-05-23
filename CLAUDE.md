@@ -12,13 +12,15 @@ intended for future conversations — read this before touching any source file.
 Express-compatible API surface. It wraps Node.js built-in `http`/`https` modules
 only. There are no runtime npm dependencies whatsoever.
 
-- **Package type:** CommonJS (`"type": "commonjs"`)
+- **Package type:** ESM-first (`"type": "module"`) with a CJS compatibility shim
 - **Version:** 1.0.4
-- **Build:** `tsc` → outputs to `./dist/`
+- **Build:** `tsc` (ESM) + `node scripts/build-cjs.cjs` (CJS bundle via esbuild) → outputs to `./dist/`
 - **Test runner:** `node --import tsx --test 'tests/*.test.ts'`
-- **TypeScript version:** 5.9.3 (strict mode, isolatedModules)
+- **TypeScript version:** 5.9.3 (strict mode, isolatedModules, esModuleInterop)
 - **tsconfig target:** ESNext, module NodeNext
-- **Outputs:** `.js`, `.d.ts`, `.d.ts.map`, `.js.map` files in `dist/`
+- **Outputs:**
+  - ESM: `.js`, `.d.ts`, `.d.ts.map`, `.js.map` files in `dist/` (tree-shakeable, one file per module)
+  - CJS: single bundled `dist/cjs/index.js` + `dist/cjs/package.json` (`{"type":"commonjs"}`)
 
 Source files live in `src/`. Only `src/**/*` is compiled (tsconfig.json).
 Test files in `tests/` use `tsx` at runtime and are never compiled.
@@ -672,8 +674,11 @@ interface GitHandlerOptions
 ## 12. Development Workflow
 
 ```bash
-# Build TypeScript → dist/
+# Build both ESM (tsc) and CJS shim (esbuild) → dist/
 npm run build
+
+# Remove all build artefacts (run before a clean build)
+npm run clean
 
 # Run all tests
 npm test
@@ -687,6 +692,29 @@ npm install
 
 The `dist/` directory is the published artifact. Always run `npm run build`
 before checking that exported types match expectations.
+
+### Dual-output build
+
+`npm run build` performs two steps:
+
+1. **`tsc`** — compiles `src/` with `tsconfig.json` (`module: NodeNext`) to
+   `dist/`. Produces one `.js` file per source file (ESM, tree-shakeable),
+   plus `.d.ts` and `.d.ts.map` declarations.
+
+2. **`node scripts/build-cjs.cjs`** — runs esbuild via its Node.js API to
+   produce a single bundled CJS file at `dist/cjs/index.js`, then writes
+   `dist/cjs/package.json` (`{"type":"commonjs"}`).
+
+esbuild is used for the CJS step (not `tsc`) because `tsc` in `CommonJS` mode
+does not support `import ... with { type: 'json' }` syntax, which is required
+for the `mimetypes.json` import in `src/static.ts`.
+
+The `package.json` `exports` field routes `import` consumers to `dist/index.js`
+and `require` consumers to `dist/cjs/index.js`. The legacy `"main"` field
+also points to `dist/cjs/index.js` for tools that do not read `exports`.
+
+`tsconfig.cjs.json` exists for **type-checking only** (`--noEmit`); it is not
+used by the build script.
 
 ### Adding a new feature checklist
 

@@ -23,7 +23,8 @@
 import fs from 'fs';
 import nodePath from 'path';
 
-import type { RouterRequest, RouterResponse, Middleware } from './router';
+import type { RouterRequest, RouterResponse, Middleware } from './router.js';
+import mimetypesJson from './mimetypes.json' with { type: 'json' };
 
 // ---------------------------------------------------------------------------
 // Mimetypes
@@ -50,7 +51,7 @@ export const mime: Mime = {
   charsets: (mimeType: string): string | null => (/^text\/|^application\/(javascript|json)/).test(mimeType) ? 'UTF-8' : null,
 };
 
-mime_define(require('./mimetypes.json'));
+mime_define(mimetypesJson as unknown as string[][]);
 
 // ---------------------------------------------------------------------------
 // Types

@@ -24,7 +24,7 @@
  */
 
 // ── Router ────────────────────────────────────────────────────────────────────
-import createRouter from './router';
+import createRouter from './router.js';
 export { createRouter }
 export type {
   Router,
@@ -38,42 +38,42 @@ export type {
   CookieOptions,
   TlsOptions,
   StringMap,
-} from './router';
+} from './router.js';
 
 // ── Static ────────────────────────────────────────────────────────────────────
 
-export { serveStatic, serveFile, sendFile, mime } from './static';
+export { serveStatic, serveFile, sendFile, mime } from './static.js';
 export type {
   StaticOptions,
   Mime
-} from './static';
+} from './static.js';
 
 // ── Miscallenous ──────────────────────────────────────────────────────────────
 
-export { json, formData, formEncoded, parseBody, logger, cors, streamFormData, parseMultipartBody } from './misc';
+export { json, formData, formEncoded, parseBody, logger, cors, streamFormData, parseMultipartBody } from './misc.js';
 export type {
   BodyOptions,
   LoggerOptions,
   FormPart,
   FormPartStream,
-} from './misc';
+} from './misc.js';
 
 // ── JWT Authentication ────────────────────────────────────────────────────────
-import createJwtPlugin from './jwt-auth'
+import createJwtPlugin from './jwt-auth.js';
 export { createJwtPlugin }
 export type {
   JwtPlugin,
   JwtConfig
-} from './jwt-auth';
+} from './jwt-auth.js';
 
 // ── Git repository ────────────────────────────────────────────────────────────
-export { gitHandler, gitCreate } from './git'
+export { gitHandler, gitCreate } from './git.js';
 export type {
     GitHandlerOptions,
-} from './git'
+} from './git.js';
 
 // ── API Service ───────────────────────────────────────────────────────────────
-import apiBuilder from './apis'
+import apiBuilder from './apis.js';
 export { apiBuilder }
 export type {
     ApiError,
@@ -84,10 +84,10 @@ export type {
     ServiceDefinition,
     ApiRouter,
     ApiRouterExtensions,
-} from './apis'
+} from './apis.js';
 
 // ── OpenAPI spec generation ───────────────────────────────────────────────────
-export { describe, openApiSpec, serializeSpec, DESCRIBE_META } from './openapi'
+export { describe, openApiSpec, serializeSpec, DESCRIBE_META } from './openapi.js';
 export type {
     JsonSchema,
     ParameterObject,
@@ -98,10 +98,10 @@ export type {
     SpecOptions,
     SpecFormat,
     OpenApiDocument,
-} from './openapi'
+} from './openapi.js';
 
 // ── Middleware ────────────────────────────────────────────────────────────────
-export { compress, requestId, rateLimit, cacheControl, csrf, securityHeaders } from './middleware';
+export { compress, requestId, rateLimit, cacheControl, csrf, securityHeaders } from './middleware.js';
 export type {
   CompressOptions,
   RequestIdOptions,
@@ -109,4 +109,4 @@ export type {
   CacheControlOptions,
   CsrfOptions,
   SecurityHeadersOptions,
-} from './middleware';
+} from './middleware.js';

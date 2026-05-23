@@ -1,0 +1,16 @@
+{
+  // Reference config for CommonJS type-checking only.
+  // The actual CJS build artifact is produced by scripts/build-cjs.cjs (esbuild),
+  // not by this tsconfig, because tsc cannot emit import-attribute syntax in
+  // CommonJS mode.  Use this file with `tsc --noEmit -p tsconfig.cjs.json`
+  // if you want to verify CJS-specific type compatibility.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  }
+}
