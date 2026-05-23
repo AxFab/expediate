@@ -60,10 +60,13 @@ export type {
 
 // ── JWT Authentication ────────────────────────────────────────────────────────
 import createJwtPlugin from './jwt-auth.js';
-export { createJwtPlugin }
+export { createJwtPlugin };
+export { createMapTokenStore } from './jwt-auth.js';
 export type {
   JwtPlugin,
-  JwtConfig
+  JwtConfig,
+  TokenStore,
+  RefreshTokenRecord,
 } from './jwt-auth.js';
 
 // ── Git repository ────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ dist/
 
 !*.js
 !*.ts
+!*.cjs
 !*.html
 
 !*.json
