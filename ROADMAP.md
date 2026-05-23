@@ -574,7 +574,7 @@ single-host deployments.
 |~~FEAT-12~~| Feature    | ✅       | Route introspection (`router.routes()`)         |
 |~~FEAT-13~~| Feature    | ✅       | ESM / dual-package build                        |
 |~~FEAT-14~~| Feature    | ✅       | `res.type()` convenience helper                 |
-| FEAT-15  | Feature     | 🟡       | Path parameter type constraints                 |
+|~~FEAT-15~~| Feature    | ✅       | Path parameter type constraints                 |
 |~~FEAT-16~~| Feature    | ✅       | JWT asymmetric algorithm support                |
 |~~FEAT-17~~| Feature    | ✅       | Documented pluggable refresh token store        |
 |~~FEAT-18~~| Feature    | ✅       | Built-in request timeout                        |

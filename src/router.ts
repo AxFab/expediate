@@ -588,7 +588,32 @@ interface Router {
  * @returns `true` if the pattern should be treated as a glob.
  */
 function isGlobPattern(pattern: string): boolean {
-  return /(?<!\\)[*?]/.test(pattern);
+  // Walk character-by-character, skipping over :name(constraint) segments so
+  // that regex metacharacters (e.g. '?') inside inline constraints are not
+  // mistaken for glob wildcards.
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === '\\') { i += 2; continue; }          // escaped — skip next char
+    if (ch === ':') {
+      i++;
+      while (i < pattern.length && /\w/.test(pattern[i])) i++; // skip param name
+      if (i < pattern.length && pattern[i] === '(') {
+        // Skip balanced constraint parens so their '?' / '*' are not counted.
+        let depth = 1; i++;
+        while (i < pattern.length && depth > 0) {
+          if (pattern[i] === '\\') { i += 2; continue; }
+          if (pattern[i] === '(') depth++;
+          else if (pattern[i] === ')') depth--;
+          i++;
+        }
+      }
+      continue;
+    }
+    if (ch === '*' || ch === '?') return true;
+    i++;
+  }
+  return false;
 }
 
 /**
@@ -628,37 +653,117 @@ function compileGlob(glob: string): RegExp {
 }
 
 /**
+/**
+ * Extract the content between a balanced pair of parentheses starting at
+ * `openIdx` in `str`, skipping backslash-escaped characters.
+ *
+ * Returns the inner pattern and the index of the closing `)` so callers can
+ * inspect any literal suffix that follows the constraint (e.g. `\.txt` in
+ * `:name([\w-]+)\.txt`).
+ *
+ * @param str     - The full segment string, e.g. `':id(\\d+)'`.
+ * @param openIdx - Index of the opening `(`.
+ * @returns `{ pattern, closeIdx }` — the inner pattern string and the index
+ *   of the matching `)`.
+ * @throws {SyntaxError} When parentheses are unbalanced.
+ */
+function extractInlinePattern(str: string, openIdx: number): { pattern: string; closeIdx: number } {
+  let depth = 0;
+  let i = openIdx;
+  for (; i < str.length; i++) {
+    if (str[i] === '\\') { i++; continue; } // skip escape sequences
+    if (str[i] === '(')  { depth++; continue; }
+    if (str[i] === ')') {
+      depth--;
+      if (depth === 0) break;
+    }
+  }
+  if (depth !== 0)
+    throw new SyntaxError(`Unbalanced parentheses in route segment '${str}'`);
+  return { pattern: str.slice(openIdx + 1, i), closeIdx: i };
+}
+
+/**
  * Compile a plain path string with optional `:name` parameter segments into a
  * prefix-anchored `RegExp` that uses named capture groups.
  *
- * Each `:name` segment is converted to `(?<name>[^/]+)`, making named
- * captures available directly on the `RegExp` match result.
- * Literal segments are escaped and matched exactly.
+ * **Basic parameters** — Each `:name` segment is converted to
+ * `(?<name>[^/]+)`, matching any non-slash sequence.
  *
- * The expression matches up to a segment boundary (`/` or end-of-string) so
- * that `/users` never inadvertently matches `/users-admin`.
+ * **Inline constraints** — A parameter may optionally be followed by a
+ * parenthesised regex pattern: `:name(pattern)`. The pattern replaces the
+ * default `[^/]+` body, so only paths where that segment matches the
+ * constraint will be routed to the handler.
  *
- * @param path - A plain path string such as `'/users/:id/posts'`.
+ * ```
+ * :id          →  (?<id>[^/]+)      (any non-slash value)
+ * :id(\d+)     →  (?<id>\d+)        (digits only)
+ * :slug([\w-]+) → (?<slug>[\w-]+)   (word chars and hyphens)
+ * ```
+ *
+ * Literal segments are regex-escaped and matched exactly. The expression
+ * matches up to a segment boundary (`/` or end-of-string) so that `/users`
+ * never inadvertently matches `/users-admin`.
+ *
+ * @param path - A plain path string such as `'/users/:id(\d+)/posts'`.
  * @returns A prefix-anchored `RegExp` with named groups for each parameter.
+ * @throws {SyntaxError} When an inline constraint is malformed, contains
+ *   named capture groups (which conflict with the outer wrapper), or produces
+ *   an invalid `RegExp`.
  *
  * @example
  * ```ts
- * const re = compilePlainPath('/users/:id');
- * re.exec('/users/42/comments')?.groups; // { id: '42' }
+ * const re = compilePlainPath('/users/:id(\\d+)');
+ * re.test('/users/42');  // true
+ * re.test('/users/abc'); // false
+ * re.exec('/users/7')?.groups; // { id: '7' }
  * ```
  */
 function compilePlainPath(path: string): RegExp {
   const segments = path.split('/').filter((s) => s.length > 0);
   const src = segments
-    .map((seg) =>
-      seg.startsWith(':')
-        ? `(?<${seg.slice(1)}>[^/]+)` // named parameter segment
-        : seg.replace(/[.+^${}()|[\]\\]/g, '\\$&'), // escaped literal
-    )
+    .map((seg) => {
+      if (!seg.startsWith(':'))
+        return seg.replace(/[.+^${}()|[\]\\]/g, '\\$&'); // escaped literal
+
+      // Parameter segment: extract name and optional inline constraint.
+      const parenIdx = seg.indexOf('(', 1);
+      if (parenIdx === -1) {
+        // Plain :name — match any non-slash sequence.
+        return `(?<${seg.slice(1)}>[^/]+)`;
+      }
+
+      // :name(pattern) — optionally followed by a literal suffix, e.g. \.txt
+      const name = seg.slice(1, parenIdx);
+      if (!name)
+        throw new SyntaxError(`Route parameter missing name before '(' in segment '${seg}'`);
+
+      const { pattern, closeIdx } = extractInlinePattern(seg, parenIdx);
+
+      // Named capture groups inside the constraint conflict with the outer
+      // (?<name>…) wrapper and would cause duplicate-group errors.
+      if (/\(\?<[^>]+>/.test(pattern))
+        throw new SyntaxError(
+          `Inline constraint for ':${name}' must not contain named capture groups.`,
+        );
+
+      // Any literal characters after the closing ')' are regex-escaped and
+      // appended — e.g. ':name([\\w-]+)\\.txt' → '(?<name>[\\w-]+)\\.txt'.
+      const suffix        = seg.slice(closeIdx + 1);
+      const escapedSuffix = suffix.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+
+      return `(?<${name}>${pattern})${escapedSuffix}`;
+    })
     .join('/');
 
-  // Allow a trailing slash or an additional path segment after the prefix.
-  return new RegExp('^/?' + src + '(?=/|$)');
+  // Validate and return — surface any regex syntax errors as SyntaxError.
+  try {
+    return new RegExp('^/?' + src + '(?=/|$)');
+  } catch (e) {
+    throw new SyntaxError(
+      `Invalid inline regex constraint in path '${path}': ${(e as Error).message}`,
+    );
+  }
 }
 
 /**
@@ -668,7 +773,7 @@ function compilePlainPath(path: string): RegExp {
  * | Input type   | Strategy                                              |
  * |--------------|-------------------------------------------------------|
  * | Glob string  | {@link compileGlob} — `.gitignore`-style wildcards    |
- * | Plain string | {@link compilePlainPath} — `:name` → named groups     |
+ * | Plain string | {@link compilePlainPath} — `:name` or `:name(re)` → named groups |
  * | `RegExp`     | Used as-is; named groups are surfaced as params       |
  *
  * @param path - The raw path pattern supplied by the caller.

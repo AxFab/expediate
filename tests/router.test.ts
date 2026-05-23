@@ -183,6 +183,149 @@ describe('compilePlainPath', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite 1b — compilePlainPath: inline regex constraints  (:name(pattern))
+// ---------------------------------------------------------------------------
+
+describe('compilePlainPath — inline constraints', () => {
+  it('matches when the segment satisfies the constraint', async () => {
+    const router = createRouter();
+    let captured = '';
+    router.get('/users/:id(\\d+)', (req, res) => {
+      captured = req.params.id;
+      res.end('ok');
+    });
+    const r = await makeRequest(router, { url: '/users/42' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(captured, '42');
+  });
+
+  it('does NOT match when the segment violates the constraint', async () => {
+    const router = createRouter();
+    let hit = false;
+    router.get('/users/:id(\\d+)', (_req, res) => { hit = true; res.end('ok'); });
+    const r = await makeRequest(router, { url: '/users/abc' });
+    assert.ok(!hit, 'handler must not be called for a non-numeric segment');
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('a constrained and an unconstrained route can coexist — constrained wins for digits', async () => {
+    const router = createRouter();
+    const hits: string[] = [];
+    router.get('/items/:id(\\d+)',  (_req, res) => { hits.push('numeric'); res.end('ok'); });
+    router.get('/items/:slug',      (_req, res) => { hits.push('slug');    res.end('ok'); });
+
+    await makeRequest(router, { url: '/items/99' });
+    assert.deepEqual(hits, ['numeric']);
+
+    hits.length = 0;
+    await makeRequest(router, { url: '/items/hello' });
+    assert.deepEqual(hits, ['slug']);
+  });
+
+  it('captures the constrained value in req.params', async () => {
+    const router = createRouter();
+    let p: Record<string, string> = {};
+    // The literal suffix '\\.txt' after the constraint means only segments
+    // ending with '.txt' match; req.params.name holds the stem only.
+    router.get('/files/:name([\\w-]+\\.txt)', (req, res) => {
+      p = { ...req.params };
+      res.end('ok');
+    });
+    const r = await makeRequest(router, { url: '/files/my-file.txt' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(p.name, 'my-file.txt');
+  });
+
+  it('supports multiple constrained params in one route', async () => {
+    const router = createRouter();
+    let p: Record<string, string> = {};
+    router.get('/org/:org([a-z]+)/repo/:num(\\d+)', (req, res) => {
+      p = { ...req.params };
+      res.end('ok');
+    });
+    await makeRequest(router, { url: '/org/acme/repo/7' });
+    assert.equal(p.org, 'acme');
+    assert.equal(p.num, '7');
+  });
+
+  it('does not match when any one constrained param fails', async () => {
+    const router = createRouter();
+    let hit = false;
+    router.get('/org/:org([a-z]+)/repo/:num(\\d+)', (_req, res) => {
+      hit = true; res.end('ok');
+    });
+    // 'ACME' fails [a-z]+
+    const r = await makeRequest(router, { url: '/org/ACME/repo/7' });
+    assert.ok(!hit);
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('supports nested parentheses in the constraint (alternation groups)', async () => {
+    const router = createRouter();
+    let captured = '';
+    router.get('/mode/:m((dark|light))', (req, res) => {
+      captured = req.params.m;
+      res.end('ok');
+    });
+    await makeRequest(router, { url: '/mode/dark' });
+    assert.equal(captured, 'dark');
+
+    const r = await makeRequest(router, { url: '/mode/blue' });
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('mixed: constrained and plain params in the same route', async () => {
+    const router = createRouter();
+    let p: Record<string, string> = {};
+    // Constrained :ver must be digits; :resource is unconstrained.
+    router.get('/v/:ver(\\d+)/:resource', (req, res) => {
+      p = { ...req.params };
+      res.end('ok');
+    });
+    const r = await makeRequest(router, { url: '/v/2/users' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(p.ver, '2');
+    assert.equal(p.resource, 'users');
+  });
+
+  it('throws SyntaxError for unbalanced parentheses', () => {
+    assert.throws(
+      () => createRouter().get('/x/:id(\\d+', (_req, res) => res.end()),
+      (e: unknown) => e instanceof SyntaxError,
+    );
+  });
+
+  it('treats trailing literal characters after the closing paren as a regex suffix', async () => {
+    // ':id(\\d+)px' compiles to '(?<id>\\d+)px', matching e.g. '42px'
+    const router = createRouter();
+    let captured = '';
+    router.get('/size/:id(\\d+)px', (req, res) => {
+      captured = req.params.id;
+      res.end('ok');
+    });
+    const hit  = await makeRequest(router, { url: '/size/42px' });
+    const miss = await makeRequest(router, { url: '/size/42' });
+    assert.equal(hit.statusCode, 200);
+    assert.equal(captured, '42');
+    assert.equal(miss.statusCode, 404);
+  });
+
+  it('throws SyntaxError when constraint contains a named capture group', () => {
+    assert.throws(
+      () => createRouter().get('/x/:id((?<inner>\\d+))', (_req, res) => res.end()),
+      (e: unknown) => e instanceof SyntaxError,
+    );
+  });
+
+  it('throws SyntaxError for an invalid regex in the constraint', () => {
+    assert.throws(
+      () => createRouter().get('/x/:id([invalid)', (_req, res) => res.end()),
+      (e: unknown) => e instanceof SyntaxError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 2 — Pattern compilation: glob paths
 // ---------------------------------------------------------------------------
 
