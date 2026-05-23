@@ -12,7 +12,7 @@ import zlib   from 'node:zlib';
 import net    from 'node:net';
 
 import createRouter from '../src/router.ts';
-import { json, formData, parseBody, logger } from '../src/misc.js';
+import { json, formData, formEncoded, parseBody, logger, streamFormData } from '../src/misc.js';
 import type { LoggerOptions } from '../src/misc.ts';
 
 // ---------------------------------------------------------------------------
@@ -203,14 +203,15 @@ describe('json() middleware', () => {
     assert.equal(r.statusCode, 413);
   });
 
-  it('returns 500 for malformed JSON', async () => {
+  it('returns 400 for malformed JSON', async () => {
     const mw   = json();
     const body = Buffer.from('{not valid json}');
     const r    = await request(mw, {
       body,
       headers: { 'content-type': 'application/json' },
     });
-    assert.equal(r.statusCode, 500);
+    // Malformed JSON is a client error — 400 Bad Request (not 500).
+    assert.equal(r.statusCode, 400);
   });
 
   it('applies the reviver function when provided', async () => {
@@ -785,6 +786,541 @@ describe('logger() middleware', () => {
 
     await request(router.listener as any, { method: 'GET', path: '/' });
     assert.ok(lines[0]?.includes('(-)'), `Expected (-) in: ${lines[0]}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 6 — Chunked Transfer-Encoding (FIX-03)
+// ---------------------------------------------------------------------------
+
+/**
+ * Like `request()` but does NOT set Content-Length, forcing the Node.js HTTP
+ * client to use chunked transfer encoding (Transfer-Encoding: chunked).
+ * This tests that body parsers correctly read chunked bodies even when there
+ * is no upfront Content-Length header.
+ */
+function requestChunked(
+  middleware: (...args: any[]) => void,
+  options: {
+    method?:  string;
+    path?:    string;
+    headers?: Record<string, string>;
+    body?:    Buffer;
+  } = {},
+): Promise<FakeResponse> {
+  return new Promise((resolve, reject) => {
+    const router = createRouter();
+    router.use('/', middleware as any);
+
+    const server = http.createServer((req, res) => {
+      (router.listener as any)(req, res, () => {
+        res.statusCode = 200;
+        res.end('next() called');
+      });
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const addr   = server.address() as net.AddressInfo;
+      const body   = options.body;
+      const chunks: Buffer[] = [];
+
+      // Deliberately omit Content-Length so Node uses chunked encoding.
+      const req = http.request(
+        {
+          host:    '127.0.0.1',
+          port:    addr.port,
+          method:  options.method  ?? 'POST',
+          path:    options.path    ?? '/',
+          headers: options.headers ?? {},
+        },
+        (res) => {
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            server.close();
+            resolve({
+              statusCode: res.statusCode ?? 0,
+              headers:    res.headers,
+              body:       Buffer.concat(chunks).toString(),
+            });
+          });
+        },
+      );
+      req.on('error', (e) => { server.close(); reject(e); });
+      if (body) req.write(body);
+      req.end();
+    });
+  });
+}
+
+describe('Chunked Transfer-Encoding (FIX-03)', () => {
+  it('json() parses a chunked JSON body without Content-Length', async () => {
+    // Before FIX-03, readBody() returned next() immediately because
+    // Content-Length was absent. With FIX-03, Transfer-Encoding: chunked
+    // is detected and the body is streamed normally.
+    const mw  = json();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('{"chunked":true}');
+    const r = await requestChunked(router.listener as any, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(parsed, { chunked: true });
+  });
+
+  it('json() calls next() when Transfer-Encoding is chunked but body is empty', async () => {
+    const mw = json();
+    // No body at all — should pass through even with chunked headers.
+    const r  = await requestChunked(mw, {
+      headers: { 'content-type': 'application/json' },
+    });
+    // Empty chunked bodies should be treated as "no body" and call next().
+    assert.equal(r.body, 'next() called');
+  });
+
+  it('formData() parses a chunked multipart body without Content-Length', async () => {
+    const boundary = 'ChunkedBoundary42';
+    const body = buildMultipart(boundary, [
+      { headers: { 'Content-Disposition': 'form-data; name="field"' }, body: 'chunkval' },
+    ]);
+    let parts: any;
+    const router = createRouter();
+    router.use('/', (formData() as any));
+    router.post('/', (req: any, res: any) => { parts = req.body; res.end('ok'); });
+
+    const r = await requestChunked(router.listener as any, {
+      body,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.ok(Array.isArray(parts), 'req.body should be an array of FormPart');
+    assert.equal(parts[0].content.toString(), 'chunkval');
+  });
+
+  it('parseBody() auto-parses a chunked application/json body', async () => {
+    const mw  = parseBody();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('{"via":"chunked"}');
+    await requestChunked(router.listener as any, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.deepEqual(parsed, { via: 'chunked' });
+  });
+
+  it('parseBody() auto-parses a chunked text/plain body', async () => {
+    const mw  = parseBody();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('plain chunked text');
+    await requestChunked(router.listener as any, {
+      body,
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(parsed, 'plain chunked text');
+  });
+
+  it('json() enforces size limit even for chunked bodies', async () => {
+    // The size limit is enforced during streaming, so it still applies
+    // even when there is no upfront Content-Length to check.
+    const mw   = json({ limit: '10b' });
+    const body = Buffer.from('{"too":"large for a 10b limit"}');
+    const r    = await requestChunked(mw, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 413);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 7 — json() strict mode (FIX-10)
+// ---------------------------------------------------------------------------
+
+describe('json() strict mode (FIX-10)', () => {
+  it('accepts an object body when strict:true (default)', async () => {
+    const mw  = json({ strict: true });
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('{"x":1}');
+    const r = await request(router.listener as any, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(parsed, { x: 1 });
+  });
+
+  it('accepts an array body when strict:true', async () => {
+    const mw  = json({ strict: true });
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('[1,2,3]');
+    const r = await request(router.listener as any, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(parsed, [1, 2, 3]);
+  });
+
+  it('returns 400 for a bare string when strict:true', async () => {
+    const mw  = json({ strict: true });
+    const body = Buffer.from('"just a string"');
+    const r = await request(mw, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 400);
+    assert.ok(r.body.includes('object or array'), `Expected error message in: ${r.body}`);
+  });
+
+  it('returns 400 for a bare number when strict:true', async () => {
+    const mw  = json({ strict: true });
+    const body = Buffer.from('42');
+    const r = await request(mw, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 400);
+  });
+
+  it('returns 400 for a bare boolean when strict:true', async () => {
+    const mw  = json({ strict: true });
+    const body = Buffer.from('true');
+    const r = await request(mw, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 400);
+  });
+
+  it('returns 400 for null when strict:true', async () => {
+    const mw  = json({ strict: true });
+    const body = Buffer.from('null');
+    const r = await request(mw, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 400);
+  });
+
+  it('accepts a bare string when strict:false', async () => {
+    const mw  = json({ strict: false });
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('"just a string"');
+    const r = await request(router.listener as any, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal(parsed, 'just a string');
+  });
+
+  it('returns 400 for invalid JSON (not 500)', async () => {
+    const mw  = json();
+    const body = Buffer.from('{ bad json }');
+    const r = await request(mw, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 8 — formEncoded() middleware (FEAT-01)
+// ---------------------------------------------------------------------------
+
+describe('formEncoded() middleware (FEAT-01)', () => {
+  const CT = 'application/x-www-form-urlencoded';
+
+  it('parses a simple key=value body', async () => {
+    const mw  = formEncoded();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('name=Alice&age=30');
+    const r = await request(router.listener as any, {
+      body,
+      headers: { 'content-type': CT },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(parsed, { name: 'Alice', age: '30' });
+  });
+
+  it('accumulates repeated keys into an array', async () => {
+    const mw  = formEncoded();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('tag=a&tag=b&tag=c');
+    await request(router.listener as any, {
+      body,
+      headers: { 'content-type': CT },
+    });
+    assert.deepEqual((parsed as any).tag, ['a', 'b', 'c']);
+  });
+
+  it('keeps single-occurrence keys as plain strings', async () => {
+    const mw  = formEncoded();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('single=value');
+    await request(router.listener as any, {
+      body,
+      headers: { 'content-type': CT },
+    });
+    assert.equal(typeof (parsed as any).single, 'string');
+    assert.equal((parsed as any).single, 'value');
+  });
+
+  it('decodes percent-encoded values', async () => {
+    const mw  = formEncoded();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('msg=hello+world&path=%2Fhome');
+    await request(router.listener as any, {
+      body,
+      headers: { 'content-type': CT },
+    });
+    // + is decoded as space by URLSearchParams; %2F is decoded as /
+    assert.equal((parsed as any).msg, 'hello world');
+    assert.equal((parsed as any).path, '/home');
+  });
+
+  it('calls next() when body is absent', async () => {
+    const mw = formEncoded();
+    const r  = await request(mw, {
+      headers: { 'content-type': CT },
+    });
+    assert.equal(r.body, 'next() called');
+  });
+
+  it('returns 415 when Content-Type is not form-urlencoded', async () => {
+    const mw = formEncoded();
+    const r  = await request(mw, {
+      body:    Buffer.from('{"key":"val"}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 415);
+  });
+
+  it('returns 413 when body exceeds the limit', async () => {
+    const mw   = formEncoded({ limit: '10b' });
+    const body = Buffer.from('key=a_very_long_value_that_exceeds_limit');
+    const r    = await request(mw, {
+      body,
+      headers: { 'content-type': CT },
+    });
+    assert.equal(r.statusCode, 413);
+  });
+
+  it('parseBody() auto-parses application/x-www-form-urlencoded', async () => {
+    const mw  = parseBody();
+    let parsed: unknown;
+    const router = createRouter();
+    router.use('/', mw as any);
+    router.post('/', (req: any, res: any) => { parsed = req.body; res.end('ok'); });
+
+    const body = Buffer.from('auto=1&auto=2');
+    await request(router.listener as any, {
+      body,
+      headers: { 'content-type': CT },
+    });
+    assert.deepEqual((parsed as any).auto, ['1', '2']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 9 — streamFormData() (FEAT-11)
+// ---------------------------------------------------------------------------
+
+describe('streamFormData() (FEAT-11)', () => {
+  const BOUNDARY = 'StreamBoundary99';
+  const CT = `multipart/form-data; boundary=${BOUNDARY}`;
+
+  it('yields one FormPartStream per multipart part', async () => {
+    const body = buildMultipart(BOUNDARY, [
+      { headers: { 'Content-Disposition': 'form-data; name="a"' }, body: 'alpha' },
+      { headers: { 'Content-Disposition': 'form-data; name="b"' }, body: 'beta' },
+    ]);
+
+    let partCount = 0;
+    const router = createRouter();
+    router.post('/', async (req: any, res: any) => {
+      for await (const _part of streamFormData(req)) partCount++;
+      res.end('ok');
+    });
+
+    const server = http.createServer((req, res) => {
+      (router.listener as any)(req, res, () => { res.statusCode = 200; res.end('next()'); });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as net.AddressInfo;
+        const req  = http.request({
+          host: '127.0.0.1', port: addr.port, method: 'POST', path: '/',
+          headers: { 'content-type': CT, 'content-length': String(body.length) },
+        }, (res) => {
+          res.resume();
+          res.on('end', () => { server.close(); resolve(); });
+        });
+        req.on('error', (e) => { server.close(); reject(e); });
+        req.write(body); req.end();
+      });
+    });
+
+    assert.equal(partCount, 2, 'Should yield exactly 2 parts');
+  });
+
+  it('exposes part content via a Readable stream', async () => {
+    const body = buildMultipart(BOUNDARY, [
+      { headers: { 'Content-Disposition': 'form-data; name="file"' }, body: 'stream content' },
+    ]);
+
+    let collected = '';
+    const router = createRouter();
+    router.post('/', async (req: any, res: any) => {
+      for await (const part of streamFormData(req)) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of part.stream) chunks.push(chunk as Buffer);
+        collected = Buffer.concat(chunks).toString();
+      }
+      res.end('ok');
+    });
+
+    const server = http.createServer((req, res) => {
+      (router.listener as any)(req, res, () => { res.statusCode = 200; res.end('next()'); });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as net.AddressInfo;
+        const req  = http.request({
+          host: '127.0.0.1', port: addr.port, method: 'POST', path: '/',
+          headers: { 'content-type': CT, 'content-length': String(body.length) },
+        }, (res) => {
+          res.resume();
+          res.on('end', () => { server.close(); resolve(); });
+        });
+        req.on('error', (e) => { server.close(); reject(e); });
+        req.write(body); req.end();
+      });
+    });
+
+    assert.equal(collected, 'stream content');
+  });
+
+  it('exposes lowercased part headers', async () => {
+    const body = buildMultipart(BOUNDARY, [
+      {
+        headers: {
+          'Content-Disposition': 'form-data; name="f"',
+          'Content-Type':        'text/plain',
+        },
+        body: 'data',
+      },
+    ]);
+
+    let seen: Record<string, string> = {};
+    const router = createRouter();
+    router.post('/', async (req: any, res: any) => {
+      for await (const part of streamFormData(req)) seen = part.headers;
+      res.end('ok');
+    });
+
+    const server = http.createServer((req, res) => {
+      (router.listener as any)(req, res, () => { res.statusCode = 200; res.end('next()'); });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as net.AddressInfo;
+        const req  = http.request({
+          host: '127.0.0.1', port: addr.port, method: 'POST', path: '/',
+          headers: { 'content-type': CT, 'content-length': String(body.length) },
+        }, (res) => {
+          res.resume();
+          res.on('end', () => { server.close(); resolve(); });
+        });
+        req.on('error', (e) => { server.close(); reject(e); });
+        req.write(body); req.end();
+      });
+    });
+
+    assert.ok('content-disposition' in seen, 'content-disposition should be lowercased');
+    assert.ok('content-type' in seen, 'content-type should be lowercased');
+  });
+
+  it('throws { httpStatus: 413 } when body exceeds the limit', async () => {
+    const body = buildMultipart(BOUNDARY, [
+      { headers: { 'Content-Disposition': 'form-data; name="f"' }, body: 'too large' },
+    ]);
+
+    let thrown: unknown = null;
+    const router = createRouter();
+    router.post('/', async (req: any, res: any) => {
+      try {
+        for await (const _part of streamFormData(req, { limit: '5b' })) { /* consume */ }
+      } catch (e) {
+        thrown = e;
+      }
+      res.status((thrown as any)?.httpStatus ?? 200).end('done');
+    });
+
+    const server = http.createServer((req, res) => {
+      (router.listener as any)(req, res, () => { res.statusCode = 200; res.end('next()'); });
+    });
+
+    const statusCode = await new Promise<number>((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as net.AddressInfo;
+        const req  = http.request({
+          host: '127.0.0.1', port: addr.port, method: 'POST', path: '/',
+          headers: { 'content-type': CT, 'content-length': String(body.length) },
+        }, (res) => {
+          res.resume();
+          res.on('end', () => { server.close(); resolve(res.statusCode ?? 0); });
+        });
+        req.on('error', (e) => { server.close(); reject(e); });
+        req.write(body); req.end();
+      });
+    });
+
+    assert.equal(statusCode, 413);
   });
 });
 

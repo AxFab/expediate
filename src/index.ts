@@ -28,6 +28,7 @@ import createRouter from './router';
 export { createRouter }
 export type {
   Router,
+  RouterOptions,
   RouterRequest,
   RouterResponse,
   Middleware,
@@ -49,11 +50,12 @@ export type {
 
 // ── Miscallenous ──────────────────────────────────────────────────────────────
 
-export { json, formData, parseBody, logger, cors } from './misc';
+export { json, formData, formEncoded, parseBody, logger, cors, streamFormData, parseMultipartBody } from './misc';
 export type {
   BodyOptions,
   LoggerOptions,
   FormPart,
+  FormPartStream,
 } from './misc';
 
 // ── JWT Authentication ────────────────────────────────────────────────────────

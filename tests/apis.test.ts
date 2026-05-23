@@ -659,9 +659,10 @@ describe('All five HTTP verbs', () => {
       GET: { '/': function () { return { ok: true }; } },
       // POST, PUT, DELETE, PATCH all absent
     };
-    // Should return 404 (no matching route), not throw.
+    // Path '/' exists for GET — a POST to it gets 405 Method Not Allowed (FIX-04).
+    // The router correctly identifies the path matches but the method is not allowed.
     const r = await request(service, { method: 'POST', path: '/' });
-    assert.equal(r.statusCode, 404);
+    assert.equal(r.statusCode, 405);
   });
 });
 

@@ -20,9 +20,10 @@
  */
 'use strict';
 
+import * as crypto from 'crypto';
 import * as http from 'http';
 import * as https from 'https';
-import { BodyOptions, extractCharset, readReqBody } from './misc';
+import { BodyOptions, FormPart, parseMultipartBody, extractCharset, readReqBody } from './misc';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,6 +31,26 @@ import { BodyOptions, extractCharset, readReqBody } from './misc';
 
 /** A key-value map of arbitrary string values. */
 type StringMap = Record<string, string>;
+
+/**
+ * Options accepted by `createRouter()`.
+ */
+interface RouterOptions {
+  /**
+   * Secret string used to sign and verify signed cookies.
+   *
+   * Required when any route calls `res.cookie(name, val, { signed: true })`.
+   * When absent, attempting to set a signed cookie throws at runtime.
+   *
+   * @example
+   * ```ts
+   * const app = createRouter({ secret: process.env.COOKIE_SECRET });
+   * app.get('/set', (_req, res) =>
+   *   res.cookie('session', 'user-id', { signed: true }).send('ok'));
+   * ```
+   */
+  secret?: string;
+}
 
 /**
  * Extended HTTP incoming message that carries parsed routing metadata.
@@ -54,18 +75,51 @@ interface RouterRequest extends http.IncomingMessage {
   params: StringMap;
   /**
    * Structured query buckets:
-   * - `url`   — parameters parsed from the query string.
+   * - `url`   — parameters parsed from the query string.  Repeated keys
+   *             (e.g. `?tag=a&tag=b`) produce an array value.
    * - `route` — named parameters captured from the route pattern.
    */
   queries: {
-    url?: StringMap;
+    url?: Record<string, string | string[]>;
     route?: StringMap;
   };
-  /** Parsed cookies sent with the request. */
-  cookies: StringMap;
+  /**
+   * Parsed cookies sent with the request.
+   *
+   * Values are decoded automatically:
+   * - `j:` prefixed values are JSON-parsed and returned as their JS type.
+   * - `s:` prefixed values are HMAC-verified using the router secret; if
+   *   valid, the inner value (decoded in turn) is returned.  Cookies that
+   *   fail verification are **not** included in this map.
+   * - Plain string values are returned unchanged.
+   */
+  cookies: Record<string, unknown>;
 
+  /**
+   * Read and parse the request body as JSON.
+   *
+   * Returns the parsed value, or `null` when the request has no body.
+   * Rejects with `{ httpStatus, message }` on parse or transport errors.
+   */
+  json(opts?: BodyOptions): Promise<unknown | null>;
 
-  json (opts?: BodyOptions):Promise<unknown|null>;
+  /**
+   * Read and decode the request body as plain text.
+   *
+   * Returns the body string (decoded using the charset in `Content-Type`,
+   * defaulting to UTF-8), or `null` when the request has no body.
+   * Rejects with `{ httpStatus, message }` on transport errors.
+   */
+  text(opts?: BodyOptions): Promise<string | null>;
+
+  /**
+   * Read and parse the request body as `multipart/form-data`.
+   *
+   * Returns an array of {@link FormPart} objects, or `null` when the request
+   * has no body.  Rejects with `{ httpStatus, message }` on parse or transport
+   * errors.
+   */
+  formData(opts?: BodyOptions): Promise<FormPart[] | null>;
 }
 
 /**
@@ -97,7 +151,10 @@ interface RouterResponse extends http.ServerResponse {
 
 /** Options accepted by `res.cookie()`. */
 interface CookieOptions {
-  /** Sign the cookie value (requires a secret on the request). */
+  /**
+   * Sign the cookie value with HMAC-SHA256 using the router's `secret`.
+   * Requires `secret` to be passed to `createRouter()`.
+   */
   signed?: boolean;
   /** Expiry date for the cookie. */
   expires?: Date;
@@ -105,6 +162,12 @@ interface CookieOptions {
   maxAge?: number;
   /** Cookie path (defaults to `'/'`). */
   path?: string;
+  /** Marks the cookie as `HttpOnly` (not accessible via `document.cookie`). */
+  httpOnly?: boolean;
+  /** Marks the cookie as `Secure` (only sent over HTTPS). */
+  secure?: boolean;
+  /** `SameSite` attribute value (`'Strict'`, `'Lax'`, or `'None'`). */
+  sameSite?: 'Strict' | 'Lax' | 'None';
 }
 
 /** Options for HTTPS servers passed to `router.listen()`. */
@@ -429,6 +492,79 @@ function matchRouteLayer(
 }
 
 // ---------------------------------------------------------------------------
+// Cookie helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Decode a raw cookie value, stripping the `j:` prefix and JSON-parsing the
+ * payload when present.  Plain string values are returned unchanged.
+ *
+ * @param raw - The raw cookie value as it appears after the `=` in the header.
+ * @returns The decoded value: a JS value for `j:` cookies, or the raw string.
+ */
+function decodeJsonCookie(raw: string): unknown {
+  if (!raw.startsWith('j:')) return raw;
+  try {
+    return JSON.parse(raw.slice(2));
+  } catch {
+    return raw; // malformed JSON — fall back to raw string
+  }
+}
+
+/**
+ * Sign a cookie value with HMAC-SHA256.
+ *
+ * The produced string follows the `cookie-signature` wire format:
+ * `s:<value>.<base64url-HMAC>`, where `<value>` is the raw (possibly
+ * `j:`-prefixed) string and the HMAC is computed over that raw string.
+ *
+ * @param value  - The raw cookie value to sign (may include a `j:` prefix).
+ * @param secret - The HMAC secret.
+ * @returns The signed cookie string with the `s:` prefix.
+ */
+function signCookieValue(value: string, secret: string): string {
+  const sig = crypto
+    .createHmac('sha256', secret)
+    .update(value)
+    .digest('base64url');
+  return `s:${value}.${sig}`;
+}
+
+/**
+ * Verify and decode a signed cookie value.
+ *
+ * The input must start with `s:` and follow the format produced by
+ * {@link signCookieValue}: `s:<value>.<base64url-HMAC>`.
+ *
+ * Uses `crypto.timingSafeEqual` to prevent timing-based signature attacks.
+ *
+ * @param signed - The raw `Set-Cookie` value including the `s:` prefix.
+ * @param secret - The HMAC secret to verify against.
+ * @returns The inner value string on success, or `false` when the signature
+ *          is absent or does not match (indicating a tampered cookie).
+ */
+function verifyCookieValue(signed: string, secret: string): string | false {
+  if (!signed.startsWith('s:')) return false;
+  const withoutPrefix = signed.slice(2);
+  const lastDot       = withoutPrefix.lastIndexOf('.');
+  if (lastDot === -1) return false;
+
+  const value    = withoutPrefix.slice(0, lastDot);
+  const received = withoutPrefix.slice(lastDot + 1);
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(value)
+    .digest('base64url');
+
+  const receivedBuf = Buffer.from(received, 'base64url');
+  const expectedBuf = Buffer.from(expected, 'base64url');
+
+  if (receivedBuf.length !== expectedBuf.length) return false;
+  if (!crypto.timingSafeEqual(receivedBuf, expectedBuf)) return false;
+  return value;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP object augmentation
 // ---------------------------------------------------------------------------
 
@@ -456,8 +592,9 @@ function matchRouteLayer(
  * @param res - The raw server response to augment.
  */
 function updateHttpObjects(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
+  req:    http.IncomingMessage,
+  res:    http.ServerResponse,
+  secret: string | undefined,
 ): void {
   const rReq = req as RouterRequest;
   const rRes = res as RouterResponse;
@@ -471,44 +608,102 @@ function updateHttpObjects(
   rReq.path = qry.pathname;
 
   // Parse URL query parameters.
-  const urlParams: StringMap = {};
-  for (const [key, value] of qry.searchParams.entries()) urlParams[key] = value;
+  // FEAT-03: repeated keys (e.g. ?tag=a&tag=b) accumulate into arrays.
+  const urlParams: Record<string, string | string[]> = {};
+  for (const [key, value] of qry.searchParams.entries()) {
+    const existing = urlParams[key];
+    if (existing === undefined) {
+      urlParams[key] = value;
+    } else if (Array.isArray(existing)) {
+      existing.push(value);
+    } else {
+      urlParams[key] = [existing, value];
+    }
+  }
   rReq.queries.url = urlParams;
-  rReq.params = { ...urlParams };
+  // params stays StringMap — use first value for repeated keys.
+  const flatParams: StringMap = {};
+  for (const [key, value] of Object.entries(urlParams)) {
+    flatParams[key] = Array.isArray(value) ? value[0] : value;
+  }
+  rReq.params = flatParams;
 
   // Parse cookies.
   if (rReq.cookies == null) {
     rReq.cookies = {};
     if (req.headers.cookie) {
-      for (const raw of req.headers.cookie.split(';')) {
-        const eqIdx = raw.indexOf('=');
+      for (const part of req.headers.cookie.split(';')) {
+        const eqIdx = part.indexOf('=');
         if (eqIdx === -1) continue;
-        rReq.cookies[raw.slice(0, eqIdx).trim()] = raw.slice(eqIdx + 1).trim();
-        // TODO: 's:' prefix → signed cookie, 'j:' prefix → JSON cookie
+        const name   = part.slice(0, eqIdx).trim();
+        const rawVal = part.slice(eqIdx + 1).trim();
+
+        if (rawVal.startsWith('s:')) {
+          // Signed cookie — verify the HMAC signature.
+          if (secret) {
+            const inner = verifyCookieValue(rawVal, secret);
+            if (inner === false) continue; // tampered — silently omit
+            rReq.cookies[name] = decodeJsonCookie(inner);
+          } else {
+            // No secret configured — include the raw value so the application
+            // can at least inspect that a signed cookie was sent.
+            rReq.cookies[name] = rawVal;
+          }
+        } else {
+          // Plain or JSON-encoded cookie.
+          rReq.cookies[name] = decodeJsonCookie(rawVal);
+        }
       }
     }
   }
 
-  rReq.json = (opts?: BodyOptions):Promise<unknown|null> => {
-    return new Promise((resolve, reject) => {
-      readReqBody(rReq, { limit: opts?.limit ?? '100kb', inflate: opts?.inflate ?? true, reviver: null, strict: false }, 'application/json')
-        .then(ret => {
-          if (ret == null)
-            return resolve(null)
-          const charset = extractCharset(ret.mimetype);
-          try {
-            (rReq as any).body = JSON.parse(
-              ret.content.toString(charset as BufferEncoding),
-              opts?.reviver ?? undefined,
-            );
-            return resolve((rReq as any).body)
-          } catch (ex) {
-            reject({ status: 500, message: (ex as Error).message });
-          }
-        })
-        .catch(err => reject(err))
-    })
-  }
+  const resolvedReqOpts = (opts?: BodyOptions) => ({
+    limit:   opts?.limit   ?? '100kb',
+    inflate: opts?.inflate ?? true,
+    reviver: null as null,
+    strict:  opts?.strict  ?? false,
+  });
+
+  rReq.json = (opts?: BodyOptions): Promise<unknown | null> => {
+    return readReqBody(rReq, resolvedReqOpts(opts), 'application/json')
+      .then(ret => {
+        if (ret == null) return null;
+        const charset = extractCharset(ret.mimetype);
+        try {
+          const parsed = JSON.parse(
+            ret.content.toString(charset as BufferEncoding),
+            opts?.reviver ?? undefined,
+          );
+          (rReq as any).body = parsed;
+          return parsed;
+        } catch (ex) {
+          return Promise.reject({ httpStatus: 400, message: 'Bad Request: ' + (ex as Error).message });
+        }
+      });
+  };
+
+  rReq.text = (opts?: BodyOptions): Promise<string | null> => {
+    return readReqBody(rReq, resolvedReqOpts(opts), null)
+      .then(ret => {
+        if (ret == null) return null;
+        const charset = extractCharset(ret.mimetype);
+        return ret.content.toString(charset as BufferEncoding);
+      });
+  };
+
+  rReq.formData = (opts?: BodyOptions): Promise<FormPart[] | null> => {
+    return readReqBody(rReq, resolvedReqOpts(opts), 'multipart/form-data')
+      .then(ret => {
+        if (ret == null) return null;
+        try {
+          const parts = parseMultipartBody(ret.mimetype, ret.content);
+          (rReq as any).body = parts;
+          return parts;
+        } catch (ex: any) {
+          return Promise.reject({ httpStatus: ex.httpStatus ?? 500, message: ex.message ?? String(ex) });
+        }
+      });
+  };
 
   rRes.setHeader('X-Powered-By', 'Expediate');
 
@@ -543,28 +738,65 @@ function updateHttpObjects(
   ): typeof rRes => {
     const opts: CookieOptions = options ?? {};
 
-    if (opts.signed && !(req as any).secret)
-      throw new Error('cookieParser("secret") required for signed cookies');
-
+    // Serialise: objects get the j: prefix so the reader can JSON-decode them.
     let val =
       typeof value === 'object' ? 'j:' + JSON.stringify(value) : String(value);
 
-    if (opts.signed) val = 's:' + val; // sign() integration point
+    if (opts.signed) {
+      if (!secret)
+        throw new Error(
+          'Signed cookies require a secret — pass { secret } to createRouter()',
+        );
+      val = signCookieValue(val, secret);
+    }
 
     let txt = `${name}=${val}`;
 
     if (opts.maxAge != null) {
-      opts.expires = new Date(Date.now() + opts.maxAge);
-      opts.maxAge = Math.floor(opts.maxAge / 1000);
-      txt += `; Max-Age=${opts.maxAge}`;
+      const maxAgeMs  = opts.maxAge;
+      const maxAgeSec = Math.floor(maxAgeMs / 1000);
+      opts.expires    = new Date(Date.now() + maxAgeMs);
+      txt += `; Max-Age=${maxAgeSec}`;
     }
 
-    if (opts.expires) txt += `; Expires=${opts.expires.toUTCString()}`;
+    if (opts.expires)  txt += `; Expires=${opts.expires.toUTCString()}`;
     txt += `; Path=${opts.path ?? '/'}`;
+    if (opts.httpOnly) txt += '; HttpOnly';
+    if (opts.secure)   txt += '; Secure';
+    if (opts.sameSite) txt += `; SameSite=${opts.sameSite}`;
 
-    res.setHeader('Set-Cookie', txt);
+    // Append rather than overwrite so multiple cookies can be set on the same
+    // response.  res.setHeader() would replace any previously set Set-Cookie
+    // header; instead, accumulate into an array.
+    const existing = res.getHeader('Set-Cookie');
+    if (existing == null) {
+      res.setHeader('Set-Cookie', txt);
+    } else if (Array.isArray(existing)) {
+      res.setHeader('Set-Cookie', [...existing, txt]);
+    } else {
+      res.setHeader('Set-Cookie', [existing as string, txt]);
+    }
+
     return rRes;
   };
+}
+
+/**
+ * Test whether a layer's path pattern matches the given path string,
+ * **ignoring the HTTP method**.  Does NOT mutate `req`.
+ *
+ * Used exclusively for **405 Method Not Allowed** detection: when
+ * `matchRouteLayer` returns `false` due to a method mismatch, calling this
+ * function lets the dispatcher confirm that the path itself is registered
+ * (just under a different method) so it can respond with 405 and an
+ * `Allow` header instead of the generic 404.
+ *
+ * @param layer - The layer whose path pattern to test.
+ * @param path  - The current value of `req.path`.
+ * @returns `true` when the path pattern matches, regardless of method.
+ */
+function pathMatchesLayer(layer: Layer, path: string): boolean {
+  return layer.regex.test(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -668,13 +900,21 @@ function registerRoute(
  * app.listen(3000, () => console.log('Listening on :3000'));
  * ```
  */
-function createRouter(): Router {
+function createRouter(opts?: RouterOptions): Router {
   const routes: Layer[] = [];
+  const secret = opts?.secret;
 
   /**
    * Core dispatch function. Walks the route table in registration order and
-   * invokes the first layer that matches the current request. Falls back to a
-   * 404 response when no layer matches and no upstream `done` callback is set.
+   * invokes the first layer that matches the current request.
+   *
+   * - **404** — no layer's path matched at all.
+   * - **405 Method Not Allowed** — at least one layer's path matched but no
+   *   layer accepted the request's HTTP method.  The `Allow` response header
+   *   lists every method registered for the matched path.
+   * - **500** — a middleware threw synchronously or returned a rejected
+   *   `Promise`.  Both cases are caught and produce an error response;
+   *   the rejection is never left unhandled.
    */
   const listener: Middleware = (
     req: RouterRequest,
@@ -685,27 +925,66 @@ function createRouter(): Router {
     const url = req.url;
     let idx = 0;
 
-    updateHttpObjects(req, res);
+    updateHttpObjects(req, res, secret);
+
+    // ── Centralised error handler (sync throws + async rejections) ──────────
+    const handleError = (e: unknown): void => {
+      console.warn(e);
+      if (!res.writableEnded)
+        res.status(500).end(`Error ${method} ${url}`);
+    };
+
+    // ── Invoke one middleware, catching both sync throws and async rejects ──
+    const invoke = (mw: Middleware, nextFn: NextFunction): void => {
+      try {
+        const ret = mw(req, res, nextFn) as unknown;
+        if (ret instanceof Promise) ret.catch(handleError);
+      } catch (e) {
+        handleError(e);
+      }
+    };
+
+    // Accumulate methods from layers whose *path* matched but whose *method*
+    // did not, so we can send 405 + Allow rather than a misleading 404.
+    const allowedMethods = new Set<string>();
 
     const next: NextFunction = (): void => {
       while (idx < routes.length) {
         const layer = routes[idx++];
         const pathBefore = req.path;
+
         if (matchRouteLayer(layer, req, req.path)) {
           if (layer.stripPath) {
             // For prefix layers (use), save the pre-strip path so we can
-            // restore it if the sub-router calls done() and control returns here.
-            // Without restoration, subsequent layers in this router would see
-            // the truncated path and fail to match their own patterns.
-            const strippedPath = req.path;
-            return layer.middleware(req, res, () => {
+            // restore it if the sub-router calls done() and control returns
+            // here.  Without restoration, subsequent layers in this router
+            // would see the truncated path and fail their own pattern matches.
+            invoke(layer.middleware, () => {
               req.path = pathBefore; // restore for the next sibling layer
               next();
             });
+            return;
           }
-          return layer.middleware(req, res, next);
+          invoke(layer.middleware, next);
+          return;
+        }
+
+        // matchRouteLayer returned false.  Check whether the path itself
+        // matches — if it does, the mismatch was the HTTP method, not the
+        // path, and we should remember the layer's method for a 405 response.
+        if (layer.method !== null && pathMatchesLayer(layer, pathBefore)) {
+          allowedMethods.add(layer.method);
         }
       }
+
+      // All layers exhausted without a match.
+      if (allowedMethods.size > 0) {
+        // The path is known but no registered method accepted this request.
+        const allow = [...allowedMethods].sort().join(', ');
+        res.status(405, { Allow: allow }).end(`Cannot ${method} ${url}`);
+        return;
+      }
+
       if (done) return done();
       res.status(404).end(`Cannot ${method} ${url}`);
     };
@@ -713,8 +992,7 @@ function createRouter(): Router {
     try {
       next();
     } catch (e) {
-      console.warn(e);
-      res.status(500).end(`Error ${method} ${url}`);
+      handleError(e);
     }
   };
 
@@ -783,6 +1061,7 @@ function createRouter(): Router {
 export default createRouter;
 export type {
   Router,
+  RouterOptions,
   RouterRequest,
   RouterResponse,
   Middleware,

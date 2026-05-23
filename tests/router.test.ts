@@ -387,17 +387,41 @@ describe('HTTP method filtering', () => {
       assert.ok(hit, `${method} should match`);
       assert.equal(r1.statusCode, 200);
 
-      for (let other in METHODS.filter((m) => m !== method)) 
-      {
-        // Wrong methods — should not match.
-        // const other = METHODS.find((m) => m !== method)!;
+      for (const other of METHODS.filter((m) => m !== method)) {
+        // Wrong methods — path matches but method doesn't → 405 Method Not Allowed.
         hit = false;
-        const r2 = await makeRequest(router, { method: other, url: '/resource' });
+        const r2 = await makeRequestNoDone(router, { method: other, url: '/resource' });
         assert.ok(!hit, `${other} should not match ${method} route`);
-        assert.equal(r2.statusCode, 400); // TODO -- 400 Or 404, wierd thing going on here!
+        assert.equal(r2.statusCode, 405, `Expected 405 when ${other} hits a ${method}-only route`);
       }
     });
   }
+
+  it('returns 405 with Allow header when path matches but method does not', async () => {
+    const router = createRouter();
+    router.get('/resource', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'POST', url: '/resource' });
+    assert.equal(r.statusCode, 405);
+    assert.ok(r.headers['allow'], 'Allow header should be present on 405 response');
+    assert.ok(
+      (r.headers['allow'] as string).includes('GET'),
+      `Expected GET in Allow: ${r.headers['allow']}`,
+    );
+  });
+
+  it('Allow header on 405 lists all registered methods for that path', async () => {
+    const router = createRouter();
+    router.get('/data',  (_req, res) => res.end('ok'));
+    router.post('/data', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'DELETE', url: '/data' });
+    assert.equal(r.statusCode, 405);
+    const allow = (r.headers['allow'] as string ?? '')
+      .split(',').map((m) => m.trim());
+    assert.ok(allow.includes('GET'),  `Expected GET in Allow: ${r.headers['allow']}`);
+    assert.ok(allow.includes('POST'), `Expected POST in Allow: ${r.headers['allow']}`);
+  });
 
   it('router.use matches any HTTP method', async () => {
     const router = createRouter();
@@ -511,6 +535,16 @@ describe('Middleware chain', () => {
     const router = createRouter();
     router.get('/boom', () => { throw new Error('kaboom'); });
     const r = await makeRequest(router, { url: '/boom' });
+    assert.equal(r.statusCode, 500);
+  });
+
+  it('returns 500 when an async middleware rejects (FIX-02)', async () => {
+    // Before FIX-02, this produced an unhandled rejection instead of a 500 response.
+    const router = createRouter();
+    router.get('/async-err', async () => {
+      throw new Error('async kaboom');
+    });
+    const r = await makeRequest(router, { url: '/async-err' });
     assert.equal(r.statusCode, 500);
   });
 
@@ -876,6 +910,31 @@ describe('Response helpers', () => {
       assert.ok(cookie?.includes('role'), `Expected JSON content in: ${cookie}`);
     });
 
+    it('multiple res.cookie() calls produce multiple Set-Cookie headers (FIX-01)', async () => {
+      // Before FIX-01, each call overwrote the previous Set-Cookie header value.
+      const router = createRouter();
+      router.get('/multi', (_req, res) => {
+        res.cookie('a', '1').cookie('b', '2').send('ok');
+      });
+      const r = await makeRequest(router, { url: '/multi' });
+      const sc = r.headers['set-cookie'];
+      assert.ok(Array.isArray(sc), `Expected array of Set-Cookie headers, got: ${JSON.stringify(sc)}`);
+      assert.equal(sc.length, 2, `Expected 2 Set-Cookie entries, got ${sc.length}: ${JSON.stringify(sc)}`);
+      assert.ok(sc.some((c) => c.includes('a=1')), `Expected a=1 cookie in: ${JSON.stringify(sc)}`);
+      assert.ok(sc.some((c) => c.includes('b=2')), `Expected b=2 cookie in: ${JSON.stringify(sc)}`);
+    });
+
+    it('three res.cookie() calls accumulate all three Set-Cookie headers', async () => {
+      const router = createRouter();
+      router.get('/triple', (_req, res) => {
+        res.cookie('x', 'one').cookie('y', 'two').cookie('z', 'three').send('ok');
+      });
+      const r = await makeRequest(router, { url: '/triple' });
+      const sc = r.headers['set-cookie'];
+      assert.ok(Array.isArray(sc), 'Expected array');
+      assert.equal(sc.length, 3);
+    });
+
     it('res.cookie() returns res for chaining', async () => {
       const router = createRouter();
       let chained = false;
@@ -891,7 +950,219 @@ describe('Response helpers', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite 10 — router.listen() return value
+// Suite 10 — Cookie encoding / decoding (FIX-05 + FIX-06)
+// ---------------------------------------------------------------------------
+
+describe('Cookie encoding and decoding (FIX-05 + FIX-06)', () => {
+  // ── FIX-06: j: prefix decoding on read ──────────────────────────────────
+
+  describe('JSON cookie round-trip (j: prefix)', () => {
+    it('reading a j: prefixed cookie returns the parsed JS object', async () => {
+      const router = createRouter();
+      let captured: unknown;
+      router.get('/me', (req, res) => { captured = req.cookies['data']; res.send('ok'); });
+      // Send the j: prefix manually in the Cookie header
+      await makeRequest(router, {
+        url:     '/me',
+        headers: { cookie: 'data=j:{"role":"admin","level":3}' },
+      });
+      assert.deepEqual(captured, { role: 'admin', level: 3 });
+    });
+
+    it('writing an object cookie and reading it back returns the object (FIX-06)', async () => {
+      // Write side: res.cookie with object value produces j:... on the wire.
+      // Read side: the j: prefix is decoded so req.cookies gets the JS object.
+      const router = createRouter();
+      let setHeader = '';
+      let readBack: unknown;
+
+      // Route 1: set the cookie, capture the Set-Cookie header
+      router.get('/set', (_req, res) => {
+        res.cookie('prefs', { theme: 'dark' }).send('ok');
+      });
+      // Route 2: read the cookie (simulated by re-sending the header value)
+      router.get('/read', (req, res) => {
+        readBack = req.cookies['prefs'];
+        res.send('ok');
+      });
+
+      const setResp = await makeRequest(router, { url: '/set' });
+      const sc = setResp.headers['set-cookie'];
+      const cookieHeader = Array.isArray(sc) ? sc[0] : sc ?? '';
+      // Extract just the name=value part (before the first ';')
+      setHeader = cookieHeader.split(';')[0].trim();
+
+      await makeRequest(router, { url: '/read', headers: { cookie: setHeader } });
+      assert.deepEqual(readBack, { theme: 'dark' });
+    });
+
+    it('j: cookie with invalid JSON falls back to the raw string', async () => {
+      const router = createRouter();
+      let captured: unknown;
+      router.get('/me', (req, res) => { captured = req.cookies['bad']; res.send('ok'); });
+      await makeRequest(router, {
+        url:     '/me',
+        headers: { cookie: 'bad=j:{not valid json}' },
+      });
+      // Malformed JSON — the raw value (including j: prefix) is returned
+      assert.equal(typeof captured, 'string');
+      assert.ok((captured as string).startsWith('j:'));
+    });
+
+    it('plain string cookies are returned unchanged', async () => {
+      const router = createRouter();
+      let captured: unknown;
+      router.get('/me', (req, res) => { captured = req.cookies['tok']; res.send('ok'); });
+      await makeRequest(router, {
+        url:     '/me',
+        headers: { cookie: 'tok=abc123' },
+      });
+      assert.equal(captured, 'abc123');
+    });
+  });
+
+  // ── FIX-05: Signed cookie write + read ──────────────────────────────────
+
+  describe('Signed cookies (FIX-05)', () => {
+    const SECRET = 'test-secret-do-not-use-in-prod';
+
+    it('res.cookie() with signed:true produces an s: prefixed Set-Cookie value', async () => {
+      const router = createRouter({ secret: SECRET });
+      router.get('/set', (_req, res) => {
+        res.cookie('session', 'user-42', { signed: true }).send('ok');
+      });
+      const r = await makeRequest(router, { url: '/set' });
+      const sc = r.headers['set-cookie'];
+      const cookie = Array.isArray(sc) ? sc[0] : sc ?? '';
+      const val = cookie.split(';')[0].split('=').slice(1).join('=');
+      assert.ok(val.startsWith('s:'), `Expected s: prefix, got: ${val}`);
+    });
+
+    it('signed cookie round-trip: written value is readable via req.cookies', async () => {
+      // Set on one request, read on the next (simulated).
+      const router = createRouter({ secret: SECRET });
+      let readBack: unknown;
+
+      router.get('/set',  (_req, res) => res.cookie('sid', 'user-7', { signed: true }).send('ok'));
+      router.get('/read', (req,  res) => { readBack = req.cookies['sid']; res.send('ok'); });
+
+      const setResp = await makeRequest(router, { url: '/set' });
+      const sc = setResp.headers['set-cookie'];
+      const cookieHeader = Array.isArray(sc) ? sc[0] : sc ?? '';
+      const rawPair = cookieHeader.split(';')[0].trim(); // "sid=s:user-7.SIG"
+
+      await makeRequest(router, { url: '/read', headers: { cookie: rawPair } });
+      // After verification, req.cookies should contain the plain inner value
+      assert.equal(readBack, 'user-7');
+    });
+
+    it('signed JSON cookie round-trip: object survives write → verify → decode', async () => {
+      const router = createRouter({ secret: SECRET });
+      let readBack: unknown;
+
+      router.get('/set',  (_req, res) => res.cookie('prefs', { lang: 'fr' }, { signed: true }).send('ok'));
+      router.get('/read', (req,  res) => { readBack = req.cookies['prefs']; res.send('ok'); });
+
+      const setResp = await makeRequest(router, { url: '/set' });
+      const sc = setResp.headers['set-cookie'];
+      const cookieHeader = Array.isArray(sc) ? sc[0] : sc ?? '';
+      const rawPair = cookieHeader.split(';')[0].trim();
+
+      await makeRequest(router, { url: '/read', headers: { cookie: rawPair } });
+      assert.deepEqual(readBack, { lang: 'fr' });
+    });
+
+    it('tampered signed cookie is silently omitted from req.cookies', async () => {
+      const router = createRouter({ secret: SECRET });
+      let captured: unknown = 'PRESENT'; // sentinel — should be overwritten to undefined
+
+      router.get('/read', (req, res) => {
+        captured = req.cookies['tok'];
+        res.send('ok');
+      });
+
+      // Build a valid signed value then corrupt the signature
+      const tampered = 's:legitimate-value.INVALIDSIGNATUREXXXXXX';
+      await makeRequest(router, {
+        url:     '/read',
+        headers: { cookie: `tok=${tampered}` },
+      });
+      assert.equal(captured, undefined, 'Tampered cookie should not appear in req.cookies');
+    });
+
+    it('different signature key → tampered → cookie omitted', async () => {
+      const routerA = createRouter({ secret: 'secret-A' });
+      const routerB = createRouter({ secret: 'secret-B' });
+      let capturedB: unknown = 'PRESENT';
+
+      // Sign with A
+      routerA.get('/set', (_req, res) => res.cookie('x', 'val', { signed: true }).send('ok'));
+      // Read with B (wrong secret)
+      routerB.get('/read', (req, res) => { capturedB = req.cookies['x']; res.send('ok'); });
+
+      const setResp = await makeRequest(routerA, { url: '/set' });
+      const sc = setResp.headers['set-cookie'];
+      const rawPair = ((Array.isArray(sc) ? sc[0] : sc) ?? '').split(';')[0].trim();
+
+      await makeRequest(routerB, { url: '/read', headers: { cookie: rawPair } });
+      assert.equal(capturedB, undefined, 'Cookie signed with a different key should be omitted');
+    });
+
+    it('calling res.cookie() with signed:true without a secret throws synchronously', async () => {
+      // createRouter() without a secret — signed cookies should throw
+      const router = createRouter(); // no secret
+      router.get('/set', (_req, res) => {
+        // This throw is caught by the router's invoke() wrapper → 500 response
+        res.cookie('x', 'val', { signed: true }).send('ok');
+      });
+      const r = await makeRequest(router, { url: '/set' });
+      assert.equal(r.statusCode, 500);
+    });
+
+    it('s: prefixed cookie without a router secret is preserved as raw string', async () => {
+      // Without a secret the router cannot verify, so the raw value is kept.
+      const router = createRouter(); // no secret
+      let captured: unknown;
+      router.get('/read', (req, res) => { captured = req.cookies['raw']; res.send('ok'); });
+      await makeRequest(router, {
+        url:     '/read',
+        headers: { cookie: 'raw=s:something.fakesig' },
+      });
+      assert.equal(captured, 's:something.fakesig');
+    });
+  });
+
+  // ── Additional CookieOptions attributes ─────────────────────────────────
+
+  describe('CookieOptions — httpOnly / secure / sameSite', () => {
+    it('httpOnly:true adds HttpOnly to Set-Cookie', async () => {
+      const router = createRouter();
+      router.get('/set', (_req, res) => res.cookie('x', '1', { httpOnly: true }).send('ok'));
+      const r = await makeRequest(router, { url: '/set' });
+      const sc = (Array.isArray(r.headers['set-cookie']) ? r.headers['set-cookie'][0] : r.headers['set-cookie']) ?? '';
+      assert.ok(sc.includes('HttpOnly'), `Expected HttpOnly in: ${sc}`);
+    });
+
+    it('secure:true adds Secure to Set-Cookie', async () => {
+      const router = createRouter();
+      router.get('/set', (_req, res) => res.cookie('x', '1', { secure: true }).send('ok'));
+      const r = await makeRequest(router, { url: '/set' });
+      const sc = (Array.isArray(r.headers['set-cookie']) ? r.headers['set-cookie'][0] : r.headers['set-cookie']) ?? '';
+      assert.ok(sc.includes('Secure'), `Expected Secure in: ${sc}`);
+    });
+
+    it('sameSite:Strict adds SameSite=Strict to Set-Cookie', async () => {
+      const router = createRouter();
+      router.get('/set', (_req, res) => res.cookie('x', '1', { sameSite: 'Strict' }).send('ok'));
+      const r = await makeRequest(router, { url: '/set' });
+      const sc = (Array.isArray(r.headers['set-cookie']) ? r.headers['set-cookie'][0] : r.headers['set-cookie']) ?? '';
+      assert.ok(sc.includes('SameSite=Strict'), `Expected SameSite=Strict in: ${sc}`);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 11 — router.listen() return value
 // ---------------------------------------------------------------------------
 
 /**
@@ -961,8 +1232,7 @@ describe('router.listen() server handle', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite 11 — registerRoute error handling
-// (was Suite 10 before the listen() suite was inserted above)
+// Suite 12 — registerRoute error handling
 // ---------------------------------------------------------------------------
 
 describe('registerRoute — invalid middleware', () => {
@@ -1027,7 +1297,7 @@ function makeRequestNoDone(
 }
 
 // ---------------------------------------------------------------------------
-// Suite 11 — Edge cases & integration
+// Suite 13 — Edge cases & integration
 // ---------------------------------------------------------------------------
 
 describe('Edge cases', () => {
@@ -1113,6 +1383,252 @@ describe('Edge cases', () => {
     router.use('/api', (_req, res) => { hit = true; res.send('ok'); });
     await makeRequest(router, { url: '/api/anything' });
     assert.ok(hit);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 14 — FEAT-03: Repeated query-string keys produce arrays
+// ---------------------------------------------------------------------------
+
+describe('FEAT-03: repeated query-string keys', () => {
+  it('single key → plain string in queries.url', async () => {
+    const router = createRouter();
+    let q: Record<string, string | string[]> = {};
+    router.get('/q', (req, res) => {
+      q = { ...(req.queries.url ?? {}) };
+      res.end('ok');
+    });
+    await makeRequest(router, { url: '/q?color=red' });
+    assert.equal(q.color, 'red');
+    assert.ok(!Array.isArray(q.color), 'single key must be a plain string');
+  });
+
+  it('two occurrences of same key → array in queries.url', async () => {
+    const router = createRouter();
+    let q: Record<string, string | string[]> = {};
+    router.get('/q', (req, res) => {
+      q = { ...(req.queries.url ?? {}) };
+      res.end('ok');
+    });
+    await makeRequest(router, { url: '/q?tag=a&tag=b' });
+    assert.deepEqual(q.tag, ['a', 'b']);
+  });
+
+  it('three occurrences produce a three-element array', async () => {
+    const router = createRouter();
+    let q: Record<string, string | string[]> = {};
+    router.get('/q', (req, res) => {
+      q = { ...(req.queries.url ?? {}) };
+      res.end('ok');
+    });
+    await makeRequest(router, { url: '/q?x=1&x=2&x=3' });
+    assert.deepEqual(q.x, ['1', '2', '3']);
+  });
+
+  it('repeated key uses first value in flat req.params', async () => {
+    const router = createRouter();
+    let p: Record<string, string> = {};
+    router.get('/q', (req, res) => {
+      p = { ...req.params };
+      res.end('ok');
+    });
+    await makeRequest(router, { url: '/q?item=first&item=second' });
+    // req.params is StringMap — only first value is stored
+    assert.equal(p.item, 'first');
+  });
+
+  it('different keys are not affected by array logic', async () => {
+    const router = createRouter();
+    let q: Record<string, string | string[]> = {};
+    router.get('/q', (req, res) => {
+      q = { ...(req.queries.url ?? {}) };
+      res.end('ok');
+    });
+    await makeRequest(router, { url: '/q?a=1&b=2&a=3' });
+    assert.deepEqual(q.a, ['1', '3']);
+    assert.equal(q.b, '2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 15 — req.text() / req.formData() extension methods (Task #18)
+// ---------------------------------------------------------------------------
+
+/**
+ * Make an HTTP POST request carrying a body through a given router, returning
+ * the collected response.  Used by extension-method tests.
+ */
+function makeBodyRequest(
+  router: ReturnType<typeof createRouter>,
+  options: {
+    method?:  string;
+    url?:     string;
+    headers?: Record<string, string>;
+    body?:    Buffer;
+  },
+): Promise<FakeResponse> {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      try {
+        (router.listener as any)(req, res, () => {
+          res.statusCode = 404;
+          res.end('not found');
+        });
+      } catch (e) {
+        reject(e);
+      }
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const addr   = server.address() as net.AddressInfo;
+      const body   = options.body;
+      const chunks: Buffer[] = [];
+
+      const extraHeaders: Record<string, string> = {};
+      if (body) extraHeaders['content-length'] = String(body.length);
+
+      const req = http.request(
+        {
+          host:    '127.0.0.1',
+          port:    addr.port,
+          method:  options.method  ?? 'POST',
+          path:    options.url     ?? '/',
+          headers: { ...extraHeaders, ...(options.headers ?? {}) },
+        },
+        (res) => {
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            server.close();
+            resolve({
+              statusCode: res.statusCode ?? 0,
+              headers:    res.headers as Record<string, string | string[]>,
+              body:       Buffer.concat(chunks).toString(),
+            });
+          });
+        },
+      );
+      req.on('error', (e) => { server.close(); reject(e); });
+      if (body) req.write(body);
+      req.end();
+    });
+  });
+}
+
+describe('req.text() / req.formData() extension methods (Task #18)', () => {
+  it('req.text() reads and returns the raw body as a string', async () => {
+    const router = createRouter();
+    router.post('/', async (req, res) => {
+      const txt = await req.text();
+      (res as any).status(200).send(txt ?? '(null)');
+    });
+    const r = await makeBodyRequest(router, {
+      body:    Buffer.from('hello extension'),
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'hello extension');
+  });
+
+  it('req.text() returns null when there is no body', async () => {
+    const router = createRouter();
+    router.get('/', async (req, res) => {
+      const txt = await req.text();
+      (res as any).status(200).send(txt === null ? 'null' : 'not-null');
+    });
+    const r = await makeRequest(router, { url: '/' });
+    assert.equal(r.body, 'null');
+  });
+
+  it('req.json() returns the parsed object', async () => {
+    const router = createRouter();
+    let parsed: unknown;
+    router.post('/', async (req, res) => {
+      parsed = await req.json();
+      (res as any).status(200).send('ok');
+    });
+    const r = await makeBodyRequest(router, {
+      body:    Buffer.from('{"ext":true}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(parsed, { ext: true });
+  });
+
+  it('req.json() returns null when there is no body', async () => {
+    const router = createRouter();
+    router.get('/', async (req, res) => {
+      const val = await req.json();
+      (res as any).status(200).send(val === null ? 'null' : 'not-null');
+    });
+    const r = await makeRequest(router, { url: '/' });
+    assert.equal(r.body, 'null');
+  });
+
+  it('req.json() rejects with { httpStatus: 400 } for invalid JSON', async () => {
+    const router = createRouter();
+    let errorStatus = 0;
+    router.post('/', async (req, res) => {
+      try {
+        await req.json();
+      } catch (e: any) {
+        errorStatus = e.httpStatus ?? 0;
+      }
+      (res as any).status(200).send('caught');
+    });
+    await makeBodyRequest(router, {
+      body:    Buffer.from('{bad json}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(errorStatus, 400, 'FIX-09: should reject with httpStatus 400');
+  });
+
+  it('req.formData() parses multipart body and returns FormPart[]', async () => {
+    const boundary = 'ExtBoundary';
+    const part1    = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="field"\r\n\r\nvalue\r\n--${boundary}--\r\n`);
+
+    const router = createRouter();
+    let parts: unknown;
+    router.post('/', async (req, res) => {
+      parts = await req.formData();
+      (res as any).status(200).send('ok');
+    });
+    const r = await makeBodyRequest(router, {
+      body:    part1,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.ok(Array.isArray(parts), 'formData() should return an array');
+    assert.equal((parts as any[])[0].content.toString(), 'value');
+  });
+
+  it('req.formData() returns null when there is no body', async () => {
+    const router = createRouter();
+    router.post('/', async (req, res) => {
+      const val = await req.formData();
+      (res as any).status(200).send(val === null ? 'null' : 'not-null');
+    });
+    const r = await makeBodyRequest(router, {
+      headers: { 'content-type': 'multipart/form-data; boundary=b' },
+    });
+    assert.equal(r.body, 'null');
+  });
+
+  it('req.text() rejects with { httpStatus: 413 } when body exceeds limit', async () => {
+    const router = createRouter();
+    let errorStatus = 0;
+    router.post('/', async (req, res) => {
+      try {
+        await req.text({ limit: '5b' });
+      } catch (e: any) {
+        errorStatus = e.httpStatus ?? 0;
+      }
+      (res as any).status(200).send('caught');
+    });
+    await makeBodyRequest(router, {
+      body:    Buffer.from('way too large for 5 bytes'),
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(errorStatus, 413, 'FIX-09: should reject with httpStatus 413');
   });
 });
 

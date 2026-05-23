@@ -20,6 +20,7 @@
  */
 'use strict';
 
+import { Readable } from 'stream';
 import zlib from 'zlib';
 import type { RouterRequest, RouterResponse, Middleware } from './router.js';
 
@@ -246,7 +247,7 @@ export function extractCharset(contentType: string): string {
  *
  * Callers that need to pass control to the next middleware when there is no
  * body should rely on the `next()` call that this function makes when
- * `Content-Length` is `0` or absent.
+ * `Content-Length` is `0` or absent and `Transfer-Encoding` is not `chunked`.
  *
  * @param req       - The incoming request.
  * @param res       - The outgoing response.
@@ -268,12 +269,17 @@ function readBody(
 
   const length = parseInt((req.headers['content-length'] as string) ?? '0', 10);
 
-  // No body declared — skip to next middleware.
-  if (!length || length === 0) return next();
+  // Detect chunked transfer encoding — no Content-Length is present in this case.
+  const isChunked = (req.headers['transfer-encoding'] as string | undefined)
+    ?.split(',').map((v) => v.trim()).some((v) => v.toLowerCase() === 'chunked') ?? false;
+
+  // No body declared and not chunked — skip to next middleware.
+  if (!isChunked && (!length || length === 0)) return next();
 
   const maxLength = readSize(opts.limit) || 102_400;
 
-  if (length > maxLength)
+  // For requests with a known Content-Length we can reject upfront.
+  if (!isChunked && length > maxLength)
     return void res.status(413).send('Content Too Large');
 
   // Compression handling.
@@ -329,18 +335,23 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
 
     const length = parseInt((req.headers['content-length'] as string) ?? '0', 10);
 
-    // No body declared
-    if (!length || length === 0) return resolve(null);
+    // Detect chunked transfer encoding — no Content-Length is present in this case.
+    const isChunked = (req.headers['transfer-encoding'] as string | undefined)
+      ?.split(',').map((v) => v.trim()).some((v) => v.toLowerCase() === 'chunked') ?? false;
+
+    // No body declared and not chunked — resolve with null.
+    if (!isChunked && (!length || length === 0)) return resolve(null);
 
     const maxLength = readSize(opts.limit) || 102_400;
 
-    if (length > maxLength)
-      return reject({ status: 413, message: 'Content Too Large' });
+    // For requests with a known Content-Length we can reject upfront.
+    if (!isChunked && length > maxLength)
+      return reject({ httpStatus: 413, message: 'Content Too Large' });
 
     // Compression handling.
     const encoding = req.headers['content-encoding'] as string | undefined;
     if (encoding && (opts.inflate === false || !DECOMPRESS_ALGO[encoding]))
-      return reject({ status: 415, message: 'Unsupported Media Type: Wrong Content-Encoding' });
+      return reject({ httpStatus: 415, message: 'Unsupported Media Type: Wrong Content-Encoding' });
 
     // eslint-disable-next-line @typescript-eslint/ban-types
     const decompress =
@@ -349,7 +360,7 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
     // Content-Type validation.
     const contentType = (req.headers['content-type'] as string) ?? '';
     if (mimetype && contentType.split(';')[0].trim() !== mimetype)
-      return reject({ status:415, message: 'Unsupported Media Type: Wrong Content-Type' });
+      return reject({ httpStatus: 415, message: 'Unsupported Media Type: Wrong Content-Type' });
 
     // Stream collection.
     let data: Buffer | null = Buffer.alloc(0);
@@ -360,7 +371,7 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
       const next_ = Buffer.concat([data, chunk]);
       if (next_.length > maxLength) {
         data = null;
-        reject({ status: 413, message: 'Content Too Large' });
+        reject({ httpStatus: 413, message: 'Content Too Large' });
         return;
       }
       data = next_;
@@ -372,7 +383,7 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
       // zlib types require NonSharedBuffer; Buffer satisfies this at runtime.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       decompress(data as any, (err, decompressed) => {
-        if (err) return reject({ status: 500, message: err.message });
+        if (err) return reject({ httpStatus: 500, message: err.message });
         resolve({ mimetype: contentType ?? '', content: decompressed as Buffer });
       });
     });
@@ -437,23 +448,29 @@ function readBodyAsJson(
 ): void {
   const charset = extractCharset(contentType);
   try {
-    (req as any).body = JSON.parse(
+    const parsed = JSON.parse(
       data.toString(charset as BufferEncoding),
       opts.reviver ?? undefined,
     );
+    // FIX-10: strict mode — reject bare primitives (strings, numbers, booleans)
+    // at the top level; only objects and arrays are accepted.
+    if (opts.strict && (typeof parsed !== 'object' || parsed === null)) {
+      return void res.status(400).send('Bad Request: JSON body must be an object or array');
+    }
+    (req as any).body = parsed;
     next();
   } catch (ex) {
-    res.status(500).send((ex as Error).message);
+    // Invalid JSON is a client error (400), not a server error.
+    res.status(400).send('Bad Request: ' + (ex as Error).message);
   }
 }
 
 /**
- * Parse a collected body buffer as `multipart/form-data`, split it on the
- * boundary declared in `contentType`, parse each part's headers, and assign
- * an array of {@link FormPart} objects to `req.body`.
+ * Parse a raw `multipart/form-data` body buffer into an array of
+ * {@link FormPart} objects.
  *
- * On success, calls `next()`.  On failure (missing boundary, malformed parts),
- * sends a 500 Internal Server Error.
+ * This is the shared parsing kernel used by both the {@link formData}
+ * middleware and the `req.formData()` extension method on the request object.
  *
  * **Multipart wire format recap:**
  * ```
@@ -467,6 +484,74 @@ function readBodyAsJson(
  * ```
  * The boundary string in `Content-Type` does **not** include the leading `--`;
  * actual part delimiters on the wire are `\r\n--boundary`.
+ *
+ * @param contentType - The raw `Content-Type` header value (must include
+ *                      `boundary=<value>`).
+ * @param data        - The fully-collected raw body buffer.
+ * @returns An array of parsed {@link FormPart} objects.
+ * @throws `{ httpStatus: 400, message }` when the `boundary` parameter is absent.
+ */
+export function parseMultipartBody(contentType: string, data: Buffer): FormPart[] {
+  const boundary = contentType
+    .split(';')
+    .map((s) => s.replace(/^\s+|\s+$/g, ''))
+    .find((s) => s.startsWith('boundary='))
+    ?.substring('boundary='.length);
+
+  if (!boundary)
+    throw { httpStatus: 400, message: 'Bad Request: missing multipart boundary' };
+
+  // Wire-level delimiter: each part (after the preamble) is preceded by
+  // \r\n--boundary.  We split on this sequence so every resulting slice is
+  // the raw content of one part (headers + blank line + body), without any
+  // leading delimiter bytes.
+  const delimiter = Buffer.from(`\r\n--${boundary}`);
+
+  // Prepend \r\n so the very first part is also cleanly split.
+  const normalized = Buffer.concat([Buffer.from('\r\n'), data]);
+  const rawParts   = splitBuffer(normalized, delimiter);
+
+  const parts: FormPart[] = [];
+
+  for (const part of rawParts) {
+    // The closing delimiter ends with '--'; skip it.
+    if (part.toString('utf8', 0, 2) === '--') continue;
+
+    // Each part begins with \r\n (from after the delimiter), then headers,
+    // then \r\n\r\n (blank line), then content.
+    // Skip the leading \r\n.
+    const partContent = part.slice(2);
+    const blankLine   = Buffer.from('\r\n\r\n');
+    const blankIdx    = partContent.indexOf(blankLine);
+
+    if (blankIdx === -1) continue; // malformed part — skip
+
+    const headerSection = partContent.slice(0, blankIdx).toString('utf8');
+    const content       = partContent.slice(blankIdx + blankLine.length);
+    const headers: Record<string, string> = {};
+
+    for (const line of headerSection.split('\r\n')) {
+      if (!line) continue;
+      const colonIdx = line.indexOf(':');
+      if (colonIdx === -1) continue;
+      const key   = line.substring(0, colonIdx).replace(/^\s+|\s+$/g, '').toLowerCase();
+      const value = line.substring(colonIdx + 1).replace(/^\s+|\s+$/g, '');
+      headers[key] = value;
+    }
+
+    parts.push({ headers, content });
+  }
+
+  return parts;
+}
+
+/**
+ * Parse a collected body buffer as `multipart/form-data`, split it on the
+ * boundary declared in `contentType`, parse each part's headers, and assign
+ * an array of {@link FormPart} objects to `req.body`.
+ *
+ * On success, calls `next()`.  On failure (missing boundary, malformed parts),
+ * sends the appropriate HTTP error.
  *
  * @param req         - The incoming request (mutated: `req.body` is set).
  * @param res         - The outgoing response.
@@ -482,61 +567,53 @@ function readBodyAsFormData(
   contentType: string,
   data:        Buffer,
 ): void {
-  const boundary = contentType
-    .split(';')
-    .map((s) => s.replace(/^\s+|\s+$/g, ''))
-    .find((s) => s.startsWith('boundary='))
-    ?.substring('boundary='.length);
-
-  if (!boundary)
-    return void res.status(400).send('Bad Request: missing multipart boundary');
-
   try {
-    // Wire-level delimiter: each part (after the preamble) is preceded by
-    // \r\n--boundary.  We split on this sequence so every resulting slice is
-    // the raw content of one part (headers + blank line + body), without any
-    // leading delimiter bytes.
-    const delimiter = Buffer.from(`\r\n--${boundary}`);
+    (req as any).body = parseMultipartBody(contentType, data);
+    next();
+  } catch (ex: any) {
+    const status = (ex as any).httpStatus ?? 500;
+    res.status(status).send((ex as any).message ?? String(ex));
+  }
+}
 
-    // Prepend \r\n so the very first part is also cleanly split.
-    const normalized = Buffer.concat([Buffer.from('\r\n'), data]);
-    const rawParts   = splitBuffer(normalized, delimiter);
-
-    const parts: FormPart[] = [];
-
-    for (const part of rawParts) {
-      // The closing delimiter ends with '--'; skip it.
-      if (part.toString('utf8', 0, 2) === '--') continue;
-
-      // Each part begins with \r\n (from after the delimiter), then headers,
-      // then \r\n\r\n (blank line), then content.
-      // Skip the leading \r\n.
-      const partContent = part.slice(2);
-      const blankLine   = Buffer.from('\r\n\r\n');
-      const blankIdx    = partContent.indexOf(blankLine);
-
-      if (blankIdx === -1) continue; // malformed part — skip
-
-      const headerSection = partContent.slice(0, blankIdx).toString('utf8');
-      const content       = partContent.slice(blankIdx + blankLine.length);
-      const headers: Record<string, string> = {};
-
-      for (const line of headerSection.split('\r\n')) {
-        if (!line) continue;
-        const colonIdx = line.indexOf(':');
-        if (colonIdx === -1) continue;
-        const key   = line.substring(0, colonIdx).replace(/^\s+|\s+$/g, '').toLowerCase();
-        const value = line.substring(colonIdx + 1).replace(/^\s+|\s+$/g, '');
-        headers[key] = value;
+/**
+ * Parse a collected body buffer as `application/x-www-form-urlencoded` and
+ * assign the result to `req.body`.
+ *
+ * Repeated keys (e.g. `tags=a&tags=b`) produce an array value:
+ * `{ tags: ['a', 'b'] }`.  Single-occurrence keys produce a plain string.
+ *
+ * @param req         - The incoming request (mutated: `req.body` is set).
+ * @param res         - The outgoing response.
+ * @param next        - Called on successful parsing.
+ * @param contentType - The raw `Content-Type` header value.
+ * @param data        - The raw body buffer.
+ */
+function readBodyAsFormEncoded(
+  req:         RouterRequest,
+  res:         RouterResponse,
+  next:        () => void,
+  contentType: string,
+  data:        Buffer,
+): void {
+  const charset = extractCharset(contentType);
+  try {
+    const params = new URLSearchParams(data.toString(charset as BufferEncoding));
+    const result: Record<string, string | string[]> = {};
+    for (const [key, value] of params.entries()) {
+      const existing = result[key];
+      if (existing === undefined) {
+        result[key] = value;
+      } else if (Array.isArray(existing)) {
+        existing.push(value);
+      } else {
+        result[key] = [existing, value];
       }
-
-      parts.push({ headers, content });
     }
-
-    (req as any).body = parts;
+    (req as any).body = result;
     next();
   } catch (ex) {
-    res.status(500).send((ex as Error).message);
+    res.status(400).send('Bad Request: ' + (ex as Error).message);
   }
 }
 
@@ -548,11 +625,13 @@ const BODY_READERS: Record<
   string,
   (req: RouterRequest, res: RouterResponse, next: () => void, opts: ResolvedBodyOptions, contentType: string, data: Buffer) => void
 > = {
-  'multipart/form-data': (req, res, next, _opts, ct, data) =>
+  'multipart/form-data':               (req, res, next, _opts, ct, data) =>
     readBodyAsFormData(req, res, next, ct, data),
-  'application/json':   (req, res, next,  opts, ct, data) =>
+  'application/json':                  (req, res, next,  opts, ct, data) =>
     readBodyAsJson(req, res, next, opts, ct, data),
-  'text/plain':         (req, res, next, _opts, ct, data) =>
+  'application/x-www-form-urlencoded': (req, res, next, _opts, ct, data) =>
+    readBodyAsFormEncoded(req, res, next, ct, data),
+  'text/plain':                        (req, res, next, _opts, ct, data) =>
     readBodyAsPlainText(req, res, next, ct, data),
 };
 
@@ -639,17 +718,60 @@ export function formData(opts?: BodyOptions): Middleware {
 }
 
 /**
+ * Middleware factory that parses an `application/x-www-form-urlencoded`
+ * request body and assigns the decoded fields to `req.body`.
+ *
+ * Repeated keys (e.g. `tags=a&tags=b`) produce an array value:
+ * `{ tags: ['a', 'b'] }`.  Single-occurrence keys produce a plain string.
+ *
+ * Behaviour:
+ * - Requests without a body are passed through to `next()`.
+ * - Bodies larger than `opts.limit` receive **413 Content Too Large**.
+ * - Bodies whose `Content-Type` is not `application/x-www-form-urlencoded`
+ *   receive **415 Unsupported Media Type**.
+ * - Parse errors receive **400 Bad Request**.
+ *
+ * @param opts - Optional configuration (see {@link BodyOptions}).
+ * @returns An Express-compatible middleware function.
+ *
+ * @example
+ * ```ts
+ * app.post('/form', formEncoded(), (req, res) => {
+ *   const { username, tags } = req.body as any;
+ *   res.json({ username, tags }); // tags may be string | string[]
+ * });
+ * ```
+ */
+export function formEncoded(opts?: BodyOptions): Middleware {
+  const resolved: ResolvedBodyOptions = {
+    inflate:  true,
+    limit:    '100kb',
+    reviver:  null,
+    strict:   true,
+    ...opts,
+  };
+
+  return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
+    readBody(req, res, resolved, 'application/x-www-form-urlencoded', next, (contentType, body) => {
+      readBodyAsFormEncoded(req, res, next, contentType, body);
+    });
+  };
+}
+
+/**
  * Middleware factory that auto-detects the `Content-Type` of the request body
  * and parses it using the appropriate parser.
  *
  * Supported MIME types:
- * - `application/json`    → parsed as JSON; result is a JS value.
- * - `multipart/form-data` → parsed as multipart; result is `FormPart[]`.
- * - `text/plain`          → decoded as text; result is a string.
+ * - `application/json`                  → parsed as JSON; result is a JS value.
+ * - `multipart/form-data`               → parsed as multipart; result is `FormPart[]`.
+ * - `application/x-www-form-urlencoded` → decoded as key/value pairs; result is
+ *                                         `Record<string, string | string[]>`.
+ * - `text/plain`                        → decoded as text; result is a string.
  *
  * Requests with an unsupported MIME type receive **415 Unsupported Media Type**.
- * All other error conditions behave identically to {@link json} and
- * {@link formData}.
+ * All other error conditions behave identically to {@link json}, {@link formData},
+ * and {@link formEncoded}.
  *
  * @param opts - Optional configuration (see {@link BodyOptions}).
  * @returns An Express-compatible middleware function.
@@ -671,6 +793,86 @@ export function parseBody(opts?: BodyOptions): Middleware {
       BODY_READERS[mimetype](req, res, next, resolved, contentType, body);
     });
   };
+}
+
+// ---------------------------------------------------------------------------
+// Streaming multipart (FEAT-11)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single part from a `multipart/form-data` body, with its content exposed
+ * as a Node.js `Readable` stream instead of a pre-collected `Buffer`.
+ *
+ * Yielded by {@link streamFormData}.
+ */
+export type FormPartStream = {
+  /**
+   * Raw part headers (e.g. `Content-Disposition`, `Content-Type`).
+   * Keys are lowercased; values are trimmed.
+   */
+  headers: Record<string, string>;
+  /**
+   * Readable stream of the part's binary content.  The stream yields the full
+   * part content as a single chunk and then ends.
+   */
+  stream: Readable;
+};
+
+/**
+ * Async generator that yields each part of a `multipart/form-data` request
+ * body as a {@link FormPartStream} object.
+ *
+ * Unlike {@link formData} (which must be installed as middleware before a
+ * handler), `streamFormData` can be called directly inside any handler and
+ * returns an async iterable of parts:
+ *
+ * ```ts
+ * app.post('/upload', async (req, res) => {
+ *   for await (const part of streamFormData(req)) {
+ *     const name = part.headers['content-disposition'];
+ *     const chunks: Buffer[] = [];
+ *     for await (const chunk of part.stream) chunks.push(chunk);
+ *     const content = Buffer.concat(chunks);
+ *     // ... process content
+ *   }
+ *   res.send('ok');
+ * });
+ * ```
+ *
+ * **Note:** the full request body is buffered before parts are yielded,
+ * because the multipart boundary must span the entire body.  For very large
+ * uploads, prefer streaming directly from the raw request.
+ *
+ * @param req  - The incoming request (must be a `multipart/form-data` request).
+ * @param opts - Optional configuration — only `limit` and `inflate` are used.
+ * @throws `{ httpStatus: 400, message }` when the `boundary` parameter is absent.
+ * @throws `{ httpStatus: 413, message }` when the body exceeds the size limit.
+ */
+export async function* streamFormData(
+  req:  RouterRequest,
+  opts?: BodyOptions,
+): AsyncGenerator<FormPartStream> {
+  const maxSize = (opts?.limit !== undefined ? readSize(opts.limit) : 0) || 102_400;
+
+  // Collect all chunks from the raw request stream.
+  const chunks: Buffer[] = [];
+  let totalSize = 0;
+
+  for await (const chunk of req as AsyncIterable<Buffer>) {
+    totalSize += chunk.length;
+    if (totalSize > maxSize) throw { httpStatus: 413, message: 'Content Too Large' };
+    chunks.push(chunk);
+  }
+
+  const body        = Buffer.concat(chunks);
+  const contentType = (req.headers['content-type'] as string) ?? '';
+  const parts       = parseMultipartBody(contentType, body);
+
+  for (const part of parts) {
+    // Expose each part's Buffer content as a Readable stream so callers can
+    // pipe, pipeline, or iterate it uniformly.
+    yield { headers: part.headers, stream: Readable.from(part.content) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -850,4 +1052,4 @@ export function cors(opts?: Partial<CorsOptions>): Middleware {
 }
 
 
-export default { json, formData, parseBody, logger, cors };
+export default { json, formData, formEncoded, parseBody, logger, cors, streamFormData };

@@ -15,86 +15,74 @@ package is used in any production environment.
 
 ### 🔴 Critical
 
-#### FIX-01 · `res.cookie()` overwrites previous cookies
+#### ~~FIX-01 · `res.cookie()` overwrites previous cookies~~ ✅ Fixed
 
-**File:** `src/router.ts` — `updateHttpObjects()`
-
-`res.setHeader('Set-Cookie', txt)` replaces any previously set `Set-Cookie`
-header, so only the last cookie survives. Sending multiple cookies on a single
-response is impossible today.
-
-**Fix:** use `res.appendHeader('Set-Cookie', txt)` (Node ≥ 18) or accumulate
-cookies in an array and call `res.setHeader('Set-Cookie', cookieArray)` once.
+`res.cookie()` now accumulates `Set-Cookie` entries into an array instead of
+overwriting. Multiple cookies on the same response are preserved correctly.
+Three new tests cover the multi-cookie case, chaining, and triple-cookie
+accumulation (`tests/router.test.ts`).
 
 ---
 
-#### FIX-02 · Async middleware errors are silently swallowed
+#### ~~FIX-02 · Async middleware errors are silently swallowed~~ ✅ Fixed
 
-**File:** `src/router.ts` — `listener()`
-
-The `try/catch` around `next()` only catches synchronous throws. A middleware
-that returns a rejected `Promise` without catching it internally produces an
-unhandled Promise rejection — no 500 response is sent to the client, the
-connection hangs.
-
-**Fix:** wrap the `layer.middleware(...)` call in a `Promise.resolve().then()`
-so that async rejections can be caught and forwarded to the 500 handler.
+The `listener()` dispatch loop now wraps every middleware call in an `invoke()`
+helper that catches both synchronous throws and async rejections, forwarding
+both to a shared `handleError()` that sends a 500 response (if the response
+has not already been written). A new test in `tests/router.test.ts` covers the
+async rejection path.
 
 ---
 
-#### FIX-03 · Chunked-transfer-encoding bodies are never read
+#### ~~FIX-03 · Chunked-transfer-encoding bodies are never read~~ ✅ Fixed
 
-**File:** `src/misc.ts` — `readBody()` and `readReqBody()`
-
-Both functions gate body reading on `Content-Length > 0`. Requests sent with
-`Transfer-Encoding: chunked` (no `Content-Length` header) are silently passed
-through to `next()` with no body — `req.body` is never set.
-
-**Fix:** treat a missing or zero `Content-Length` as "unknown size" and still
-collect `data` events, capping accumulation at `opts.limit`.
+`readBody()` and `readReqBody()` in `src/misc.ts` now detect
+`Transfer-Encoding: chunked` and skip the `Content-Length` pre-check when
+chunked encoding is in use. The size limit is still enforced by accumulation
+during streaming. Six new tests in `tests/misc.test.ts` (Suite 6) cover
+`json()`, `formData()`, and `parseBody()` with chunked bodies, including the
+size-limit enforcement path.
 
 ---
 
-#### FIX-04 · Wrong HTTP method returns 404 instead of 405
+#### ~~FIX-04 · Wrong HTTP method returns 404 instead of 405~~ ✅ Fixed
 
-**File:** `src/router.ts` — `listener()`
-
-When a path is registered for `GET` and a `POST` is made to it, the router
-falls through all layers and ultimately responds with `404 Cannot POST /path`.
-RFC 7231 §6.5.5 requires `405 Method Not Allowed` with an `Allow` header.
-
-**Fix:** during the fallthrough walk, track whether any layer matched the path
-but was filtered out by method; if so, respond 405 with the list of allowed
-methods in the `Allow` header.
+The `listener()` now tracks, for each visited layer, whether the path matched
+but the method did not. After the full walk, if any such layer was found the
+router responds `405 Method Not Allowed` with an `Allow` header listing every
+method that IS registered for that path. Tests updated in `tests/router.test.ts`
+(the broken `for...in` loop corrected to `for...of`, expected status updated
+from 400 → 405) and two new tests added for the `Allow` header content.
 
 ---
 
 ### 🟠 High
 
-#### FIX-05 · Signed cookies are non-functional
+#### ~~FIX-05 · Signed cookies are non-functional~~ ✅ Fixed
 
-**File:** `src/router.ts` — `res.cookie()`
-
-When `opts.signed = true`, the code prepends `s:` but then throws
-`cookieParser("secret") required for signed cookies` because `req.secret` is
-never populated by the framework. The feature is advertised but completely
-broken.
-
-**Fix:** either remove the `signed` option until it is implemented, or integrate
-an HMAC signing step using a configurable secret passed to the router (similar
-to how `createJwtPlugin` takes a secret).
+`createRouter()` now accepts a `{ secret }` option. When `res.cookie()` is
+called with `{ signed: true }`, the value is HMAC-SHA256 signed using the
+router secret and serialised as `s:<value>.<base64url-signature>`. Calling
+`res.cookie()` with `{ signed: true }` when no secret was provided throws
+immediately (caught by `invoke()` → 500 response). Three new helper functions
+(`signCookieValue`, `verifyCookieValue`, `decodeJsonCookie`) are implemented
+in `src/router.ts`. The `RouterOptions` type is exported from `src/index.ts`.
+`CookieOptions` also gains `httpOnly`, `secure`, and `sameSite` attributes.
+Eight new tests in `tests/router.test.ts` cover write format, round-trip,
+signed-JSON round-trip, tamper detection, cross-secret rejection, missing-secret
+error, and the new `httpOnly`/`secure`/`sameSite` header attributes.
 
 ---
 
-#### FIX-06 · Cookie reading ignores `j:` and `s:` prefixes
+#### ~~FIX-06 · Cookie reading ignores `j:` and `s:` prefixes~~ ✅ Fixed
 
-**File:** `src/router.ts` — `updateHttpObjects()`
-
-The cookie parser returns raw strings including the `j:` and `s:` prefixes
-that `res.cookie()` writes. Code reading `req.cookies['name']` gets `j:{"foo":1}`
-instead of the parsed object.
-
-**Fix:** strip `s:` and `j:` prefixes on read, JSON-parsing `j:` values.
+The cookie parser in `updateHttpObjects()` now decodes cookies on read:
+- `j:` prefix → JSON-parsed; result is the JS value (object, array, etc.).
+- `s:` prefix + router secret → HMAC-verified; on success the inner value
+  (possibly `j:`-encoded) is decoded; on failure the cookie is silently omitted.
+- `s:` prefix without a router secret → raw value preserved as-is.
+- `req.cookies` type updated to `Record<string, unknown>` to accommodate
+  non-string JSON values. Four new tests cover each decode path.
 
 ---
 
@@ -126,31 +114,29 @@ structure.
 
 ---
 
-#### FIX-09 · `req.json()` rejects with an inconsistent error shape
+#### ~~FIX-09 · `req.json()` rejects with an inconsistent error shape~~ ✅ Fixed
 
-**File:** `src/router.ts` — `updateHttpObjects()`
-
-The rejection value uses `{ status, message }` (lowercase `status`) while the
-rest of the framework uses `{ httpStatus, message }` (e.g. `ApiError`). Code
-that catches `req.json()` rejections and tries to forward them as HTTP errors
-must know which shape to expect.
-
-**Fix:** align on one shape — `{ httpStatus, message }` — throughout.
+`readReqBody()` in `src/misc.ts` and the `req.json()` extension method in
+`src/router.ts` now consistently reject with `{ httpStatus, message }` (was
+`{ status, message }`). All five rejection sites in `readReqBody` and the
+catch path in `req.json()` were updated. Additionally, `req.text()` and
+`req.formData()` extension methods were added alongside `req.json()`, all
+sharing the same `{ httpStatus, message }` rejection shape. Tests added in
+`tests/router.test.ts` (Suite 15) verify the rejection shape for all three
+methods.
 
 ---
 
 ### 🟡 Medium
 
-#### FIX-10 · `BodyOptions.strict` is documented but never enforced
+#### ~~FIX-10 · `BodyOptions.strict` is documented but never enforced~~ ✅ Fixed
 
-**File:** `src/misc.ts` — `readBodyAsJson()`
-
-The option is marked in the JSDoc as restricting JSON to top-level
-objects/arrays, but the check is never applied. The field silently has no
-effect.
-
-**Fix:** after `JSON.parse`, check `typeof result !== 'object' || result === null`
-when `opts.strict` is `true` and send a 400 if a bare primitive is received.
+`readBodyAsJson()` in `src/misc.ts` now checks, after `JSON.parse`, whether
+`opts.strict` is true and the result is not an object or array. Bare primitives
+(strings, numbers, booleans, null) produce a 400 Bad Request response. JSON
+parse errors also changed from 500 to 400 (client error). Eight new tests
+cover the strict-mode accept/reject matrix and the 400-on-invalid-JSON case
+(`tests/misc.test.ts` Suite 7).
 
 ---
 
@@ -208,14 +194,15 @@ that expediate currently lacks entirely.
 
 ### 🔴 Critical (production blockers)
 
-#### FEAT-01 · `application/x-www-form-urlencoded` body parser
+#### ~~FEAT-01 · `application/x-www-form-urlencoded` body parser~~ ✅ Implemented
 
-HTML `<form method="POST">` submissions use `application/x-www-form-urlencoded`
-by default. The framework has no parser for this MIME type, so standard HTML
-form submissions are unreadable without custom middleware.
-
-**Proposal:** add `formEncoded(opts?)` middleware (or extend `parseBody`) that
-decodes `key=value&key2=value2` bodies and assigns the result to `req.body`.
+`formEncoded(opts?)` middleware added to `src/misc.ts` and exported from
+`src/index.ts`. Repeated keys (`tag=a&tag=b`) produce array values
+(`{ tag: ['a', 'b'] }`); single-occurrence keys remain plain strings.
+`parseBody()` and the `BODY_READERS` dispatch table were updated to handle this
+MIME type automatically. Eight new tests in `tests/misc.test.ts` (Suite 8)
+cover simple key/value, arrays, percent-encoding, size limits, and the
+auto-detection path via `parseBody()`.
 
 ---
 
@@ -231,14 +218,14 @@ and add an optional `router.shutdown(timeout?)` helper that calls
 
 ---
 
-#### FEAT-03 · Request query-string array support
+#### ~~FEAT-03 · Request query-string array support~~ ✅ Implemented
 
-Multiple values for the same parameter (`?ids=1&ids=2` or `?ids[]=1&ids[]=2`)
-are silently collapsed to the last value by the `URLSearchParams` iteration in
-`updateHttpObjects`. This makes it impossible to accept list-type query params.
-
-**Proposal:** expose `req.queries.url` as `Record<string, string | string[]>`
-and parse repeated keys into arrays.
+`req.queries.url` type changed from `StringMap` to `Record<string, string | string[]>`.
+The parsing loop in `updateHttpObjects()` now accumulates repeated keys into
+arrays. The flat `req.params` map retains StringMap semantics by using the first
+value for any repeated key. Five new tests in `tests/router.test.ts` (Suite 14)
+cover single keys, two-value arrays, three-value arrays, flat-params first-value
+semantics, and mixed distinct/repeated keys.
 
 ---
 
@@ -332,14 +319,18 @@ manually and then calling `sendFile`.
 
 ---
 
-#### FEAT-11 · Multipart streaming (large file uploads)
+#### ~~FEAT-11 · Multipart streaming (large file uploads)~~ ✅ Implemented
 
-`formData()` buffers the entire multipart body into memory before parsing. Large
-file uploads will exhaust the server's memory or be rejected by the size limit.
-
-**Proposal:** add a streaming variant `formDataStream(opts?)` that exposes
-each part as a readable stream, allowing callers to pipe them directly to disk
-or object storage without buffering.
+`streamFormData(req, opts?)` async generator function added to `src/misc.ts`
+and exported from `src/index.ts`. It reads the full body via `for await` over
+the raw request, splits on the multipart boundary using the existing
+`parseMultipartBody()` helper, and yields `{ headers, stream: Readable }` per
+part (content exposed as a `Readable.from(buffer)` stream). Note: the body is
+still fully buffered before parts are yielded; true non-buffered streaming would
+require a more complex incremental parser. `parseMultipartBody()` was extracted
+from `readBodyAsFormData()` and exported for reuse. Four new tests in
+`tests/misc.test.ts` (Suite 9) cover part count, content streaming, lowercased
+headers, and the 413 size-limit throw.
 
 ---
 
@@ -555,23 +546,23 @@ single-host deployments.
 
 | ID       | Category    | Priority | Title                                          |
 |----------|-------------|----------|------------------------------------------------|
-| FIX-01   | Bug         | 🔴       | `res.cookie()` overwrites previous cookies      |
-| FIX-02   | Bug         | 🔴       | Async middleware errors unhandled               |
-| FIX-03   | Bug         | 🔴       | Chunked-encoding bodies never read              |
-| FIX-04   | Bug         | 🔴       | Wrong method returns 404 instead of 405         |
-| FIX-05   | Bug         | 🟠       | Signed cookies non-functional                   |
-| FIX-06   | Bug         | 🟠       | Cookie reading ignores `j:`/`s:` prefixes       |
-| FIX-07   | Bug         | 🟠       | `async setup()` not awaited in apiBuilder        |
+|~~FIX-01~~| Bug         | ✅       | `res.cookie()` overwrites previous cookies      |
+|~~FIX-02~~| Bug         | ✅       | Async middleware errors unhandled               |
+|~~FIX-03~~| Bug         | ✅       | Chunked-encoding bodies never read              |
+|~~FIX-04~~| Bug         | ✅       | Wrong method returns 404 instead of 405         |
+|~~FIX-05~~| Bug         | ✅       | Signed cookies non-functional                   |
+|~~FIX-06~~| Bug         | ✅       | Cookie reading ignores `j:`/`s:` prefixes       |
+| FIX-07   | Bug         | 🟠       | `async setup()` not awaited in apiBuilder       |
 | FIX-08   | Bug         | 🟠       | Refresh token store grows without bound         |
-| FIX-09   | Bug         | 🟠       | `req.json()` rejects with wrong error shape     |
-| FIX-10   | Bug         | 🟡       | `BodyOptions.strict` not enforced               |
+|~~FIX-09~~| Bug         | ✅       | `req.json()` rejects with wrong error shape     |
+|~~FIX-10~~| Bug         | ✅       | `BodyOptions.strict` not enforced               |
 | FIX-11   | Bug         | 🟡       | Directory listing unsorted                      |
-| ~~FIX-12~~| Bug        | ✅       | `listen()` exposes no server handle             |
+|~~FIX-12~~| Bug         | ✅       | `listen()` exposes no server handle             |
 | FIX-13   | Bug         | 🟡       | Incomplete JSDoc on `gitCreate`                 |
 | FIX-14   | Bug         | 🟡       | `refreshTokenSecret` is a no-op field           |
-| FEAT-01  | Feature     | 🔴       | `application/x-www-form-urlencoded` parser      |
+|~~FEAT-01~~| Feature    | ✅       | `application/x-www-form-urlencoded` parser      |
 | FEAT-02  | Feature     | 🔴       | Graceful shutdown                               |
-| FEAT-03  | Feature     | 🔴       | Query-string array support                      |
+|~~FEAT-03~~| Feature    | ✅       | Query-string array support                      |
 | FEAT-04  | Feature     | 🔴       | Global error handler hook                       |
 | FEAT-05  | Feature     | 🔴       | Response compression middleware                 |
 | FEAT-06  | Feature     | 🟠       | Router base path / prefix                       |
@@ -579,7 +570,7 @@ single-host deployments.
 | FEAT-08  | Feature     | 🟠       | `req.ip` and proxy trust setting                |
 | FEAT-09  | Feature     | 🟠       | Request ID middleware                           |
 | FEAT-10  | Feature     | 🟠       | `res.download()` helper                         |
-| FEAT-11  | Feature     | 🟠       | Multipart streaming for large uploads           |
+|~~FEAT-11~~| Feature    | ✅       | Multipart streaming for large uploads           |
 | FEAT-12  | Feature     | 🟠       | Route introspection (`router.routes()`)         |
 | FEAT-13  | Feature     | 🟡       | ESM / dual-package build                        |
 | FEAT-14  | Feature     | 🟡       | `res.type()` convenience helper                 |
