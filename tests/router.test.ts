@@ -1633,6 +1633,397 @@ describe('req.text() / req.formData() extension methods (Task #18)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite 16 — router.onError()
+// ---------------------------------------------------------------------------
+
+describe('router.onError()', () => {
+  it('onError handler is called instead of the default 500 when middleware throws', async () => {
+    const router = createRouter();
+    let caughtErr: unknown;
+    router.onError((err, _req, res) => {
+      caughtErr = err;
+      res.status(500).send('caught');
+    });
+    router.get('/boom', () => { throw new Error('kaboom'); });
+
+    const r = await makeRequest(router, { url: '/boom' });
+    assert.equal(r.statusCode, 500);
+    assert.equal(r.body, 'caught');
+    assert.ok(caughtErr instanceof Error, 'error handler should receive the thrown Error');
+  });
+
+  it('onError handler is called when an async middleware rejects', async () => {
+    const router = createRouter();
+    let caughtMsg = '';
+    router.onError((err, _req, res) => {
+      caughtMsg = String(err);
+      res.status(500).send('async caught');
+    });
+    router.get('/async-err', async () => { throw new Error('async boom'); });
+
+    const r = await makeRequest(router, { url: '/async-err' });
+    assert.equal(r.statusCode, 500);
+    assert.equal(r.body, 'async caught');
+    assert.ok(caughtMsg.includes('async boom'));
+  });
+
+  it('onError handler is called when next(err) is used', async () => {
+    const router = createRouter();
+    let seen: unknown;
+    router.onError((err, _req, res) => { seen = err; res.status(422).send('from next'); });
+    router.get('/fail', (_req, _res, next) => next('validation error'));
+
+    const r = await makeRequest(router, { url: '/fail' });
+    assert.equal(r.statusCode, 422);
+    assert.equal(r.body, 'from next');
+    assert.equal(seen, 'validation error');
+  });
+
+  it('next(err) skips remaining middleware and goes straight to error handler', async () => {
+    const router = createRouter();
+    let secondCalled = false;
+    router.onError((_err, _req, res) => res.status(500).send('error'));
+    router.get('/fail', (_req, _res, next) => next(new Error('stop')));
+    router.get('/fail', (_req, res) => { secondCalled = true; res.send('should not reach here'); });
+
+    await makeRequest(router, { url: '/fail' });
+    assert.ok(!secondCalled, 'second handler must not be called after next(err)');
+  });
+
+  it('calling onError again replaces the previous handler', async () => {
+    const router = createRouter();
+    router.onError((_err, _req, res) => res.status(500).send('first'));
+    router.onError((_err, _req, res) => res.status(500).send('second'));
+    router.get('/boom', () => { throw new Error('x'); });
+
+    const r = await makeRequest(router, { url: '/boom' });
+    assert.equal(r.body, 'second');
+  });
+
+  it('without onError, sync throws still produce a 500', async () => {
+    const router = createRouter();
+    router.get('/boom', () => { throw new Error('raw'); });
+    const r = await makeRequest(router, { url: '/boom' });
+    assert.equal(r.statusCode, 500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 17 — router.setNotFound()
+// ---------------------------------------------------------------------------
+
+describe('router.setNotFound()', () => {
+  it('setNotFound handler fires instead of default 404 when no route matches', async () => {
+    const router = createRouter();
+    router.setNotFound((_req, res) => res.status(404).send('custom 404'));
+    router.get('/exists', (_req, res) => res.send('ok'));
+
+    const r = await makeRequestNoDone(router, { url: '/missing' });
+    assert.equal(r.statusCode, 404);
+    assert.equal(r.body, 'custom 404');
+  });
+
+  it('setNotFound handler is NOT called when a route matches', async () => {
+    const router = createRouter();
+    let notFoundCalled = false;
+    router.setNotFound((_req, res) => { notFoundCalled = true; res.status(404).send('nf'); });
+    router.get('/exists', (_req, res) => res.send('found'));
+
+    const r = await makeRequestNoDone(router, { url: '/exists' });
+    assert.equal(r.statusCode, 200);
+    assert.ok(!notFoundCalled, 'setNotFound must not be called when a route matches');
+  });
+
+  it('done() callback takes precedence over setNotFound (sub-router behaviour)', async () => {
+    // When the router is used as a sub-router (has a done()), the done() is
+    // called on no-match rather than setNotFound — the parent is responsible.
+    const child = createRouter();
+    let childNotFound = false;
+    child.setNotFound((_req, res) => { childNotFound = true; res.status(404).send('child nf'); });
+
+    const parent = createRouter();
+    let doneCalled = false;
+    parent.use('/', (req, res, next) => {
+      (child.listener as any)(req, res, () => { doneCalled = true; next(); });
+    });
+    parent.get('/fallback', (_req, res) => res.send('parent fallback'));
+
+    const r = await makeRequest(parent, { url: '/fallback' });
+    assert.ok(doneCalled, 'done() should be called when child has no match');
+    assert.ok(!childNotFound, 'child setNotFound must not fire when done() is available');
+    assert.equal(r.body, 'parent fallback');
+  });
+
+  it('setNotFound handler can send JSON', async () => {
+    const router = createRouter();
+    router.setNotFound((_req, res) => res.status(404).json({ error: 'not found' }));
+
+    const r = await makeRequestNoDone(router, { url: '/ghost' });
+    assert.equal(r.statusCode, 404);
+    assert.ok(r.headers['content-type']?.includes('application/json'));
+    assert.deepEqual(JSON.parse(r.body), { error: 'not found' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 18 — router.routes()
+// ---------------------------------------------------------------------------
+
+describe('router.routes()', () => {
+  it('returns an empty array for a fresh router', () => {
+    const router = createRouter();
+    assert.deepEqual(router.routes(), []);
+  });
+
+  it('returns one entry per registered layer', () => {
+    const router = createRouter();
+    router.get('/a', (_req, res) => res.send('ok'));
+    router.post('/b', (_req, res) => res.send('ok'));
+    assert.equal(router.routes().length, 2);
+  });
+
+  it('returned entries have correct method and path', () => {
+    const router = createRouter();
+    router.get('/users', (_req, res) => res.send('ok'));
+    router.post('/items', (_req, res) => res.send('ok'));
+
+    const info = router.routes();
+    assert.ok(info.some((r) => r.method === 'GET'  && r.path === '/users'));
+    assert.ok(info.some((r) => r.method === 'POST' && r.path === '/items'));
+  });
+
+  it('use() layers have stripPath: true; method layers have stripPath: false', () => {
+    const router = createRouter();
+    router.use('/prefix', (_req, _res, next) => next());
+    router.get('/exact', (_req, res) => res.send('ok'));
+
+    const info = router.routes();
+    const prefixEntry = info.find((r) => r.path === '/prefix');
+    const exactEntry  = info.find((r) => r.path === '/exact');
+    assert.ok(prefixEntry?.stripPath  === true,  'use() layer must have stripPath true');
+    assert.ok(exactEntry?.stripPath   === false, 'get() layer must have stripPath false');
+  });
+
+  it('use() with null method; get() with method GET', () => {
+    const router = createRouter();
+    router.use('/mw', (_req, _res, next) => next());
+    router.get('/route', (_req, res) => res.send('ok'));
+
+    const info = router.routes();
+    assert.equal(info.find((r) => r.path === '/mw')?.method,    null);
+    assert.equal(info.find((r) => r.path === '/route')?.method, 'GET');
+  });
+
+  it('routes() returns a snapshot — adding routes later updates future calls', () => {
+    const router = createRouter();
+    router.get('/first', (_req, res) => res.send('ok'));
+    const snap1 = router.routes();
+
+    router.post('/second', (_req, res) => res.send('ok'));
+    const snap2 = router.routes();
+
+    assert.equal(snap1.length, 1);
+    assert.equal(snap2.length, 2);
+  });
+
+  it('mutating the returned array does not affect the live route table', () => {
+    const router = createRouter();
+    router.get('/x', (_req, res) => res.send('ok'));
+
+    const snap = router.routes();
+    snap.splice(0); // clear the snapshot
+
+    assert.equal(router.routes().length, 1, 'Live route table must be unaffected');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 19 — createRouter(prefix) + app.use(v1) shorthand
+// ---------------------------------------------------------------------------
+
+describe('createRouter(prefix) + app.use(v1)', () => {
+  it('createRouter stores the prefix on router.prefix', () => {
+    const v1 = createRouter('/api/v1');
+    assert.equal(v1.prefix, '/api/v1');
+  });
+
+  it('createRouter() without prefix has undefined router.prefix', () => {
+    const r = createRouter();
+    assert.equal(r.prefix, undefined);
+  });
+
+  it('app.use(v1) mounts the sub-router at v1.prefix automatically', async () => {
+    const v1 = createRouter('/api/v1');
+    v1.get('/users', (_req, res) => res.send('users'));
+
+    const app = createRouter();
+    app.use(v1); // no explicit path — uses v1.prefix
+
+    const r = await makeRequest(app, { url: '/api/v1/users' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'users');
+  });
+
+  it('a request outside the prefix returns 404', async () => {
+    const v1 = createRouter('/api/v1');
+    v1.get('/users', (_req, res) => res.send('users'));
+
+    const app = createRouter();
+    app.use(v1);
+
+    const r = await makeRequest(app, { url: '/api/v2/users' });
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('prefix can be combined with options', () => {
+    const r = createRouter('/api/v1', { secret: 'shhh' });
+    assert.equal(r.prefix, '/api/v1');
+  });
+
+  it('sub-router routes receive the stripped path suffix', async () => {
+    const v1 = createRouter('/api/v1');
+    let seenPath = '';
+    v1.get('/items', (req, res) => { seenPath = req.path; res.send('ok'); });
+
+    const app = createRouter();
+    app.use(v1);
+
+    await makeRequest(app, { url: '/api/v1/items' });
+    assert.equal(seenPath, '/items');
+  });
+
+  it('multiple prefixed sub-routers are all reachable', async () => {
+    const v1 = createRouter('/v1');
+    v1.get('/ping', (_req, res) => res.send('v1'));
+
+    const v2 = createRouter('/v2');
+    v2.get('/ping', (_req, res) => res.send('v2'));
+
+    const app = createRouter();
+    app.use(v1);
+    app.use(v2);
+
+    const r1 = await makeRequest(app, { url: '/v1/ping' });
+    const r2 = await makeRequest(app, { url: '/v2/ping' });
+    assert.equal(r1.body, 'v1');
+    assert.equal(r2.body, 'v2');
+  });
+
+  it('app.use(v1) without a prefix defaults to mounting at /', async () => {
+    const child = createRouter(); // no prefix
+    child.get('/hello', (_req, res) => res.send('hello'));
+
+    const app = createRouter();
+    app.use(child); // should mount at '/'
+
+    const r = await makeRequest(app, { url: '/hello' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'hello');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 20 — router.shutdown()
+// ---------------------------------------------------------------------------
+
+describe('router.shutdown()', () => {
+  it('shutdown() resolves immediately when listen() was never called', async () => {
+    const router = createRouter();
+    // Should not throw or hang.
+    await assert.doesNotReject(router.shutdown());
+  });
+
+  it('shutdown() stops the server from accepting new connections', async () => {
+    const router = createRouter();
+    router.get('/ping', (_req, res) => res.send('pong'));
+
+    const server = await new Promise<ReturnType<typeof router.listen>>((resolve) => {
+      const s = router.listen(0, () => resolve(s));
+    });
+    const addr = server.address() as net.AddressInfo;
+    const port = addr.port;
+
+    // Verify server is up.
+    const body1 = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      const req = http.request({ host: '127.0.0.1', port, path: '/ping' }, (res) => {
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(body1, 'pong');
+
+    // Shut down.
+    await router.shutdown(200);
+    assert.ok(!(server as any).listening, 'Server should no longer be listening after shutdown');
+  });
+
+  it('shutdown() with timeout 0 still closes the server', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => res.send('ok'));
+
+    await new Promise<void>((resolve) => { router.listen(0, () => resolve()); });
+    // timeout=0 means no forced socket destroy, but close() is still called
+    await assert.doesNotReject(router.shutdown(0));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 21 — router.timeout option (request timeout → 408)
+// ---------------------------------------------------------------------------
+
+describe('RouterOptions.timeout — request timeout', () => {
+  it('sends 408 when a handler never responds within the timeout window', async () => {
+    const router = createRouter({ timeout: 60 }); // 60 ms
+    router.get('/stall', () => {
+      // Deliberately does nothing — handler never calls res.end().
+    });
+
+    const r = await makeRequest(router, { url: '/stall' });
+    assert.equal(r.statusCode, 408, `Expected 408 Request Timeout, got ${r.statusCode}`);
+  });
+
+  it('does NOT send 408 when a handler responds before the timeout', async () => {
+    const router = createRouter({ timeout: 500 }); // generous timeout
+    router.get('/fast', (_req, res) => res.send('quick'));
+
+    const r = await makeRequest(router, { url: '/fast' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'quick');
+  });
+
+  it('without a timeout option, slow handlers are not interrupted', async () => {
+    const router = createRouter(); // no timeout
+    router.get('/slow', async (_req, res) => {
+      await new Promise((r) => setTimeout(r, 80));
+      res.send('eventually');
+    });
+
+    const r = await makeRequest(router, { url: '/slow' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'eventually');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 22 — res.json() Content-Type header
+// ---------------------------------------------------------------------------
+
+describe('res.json() sets Content-Type: application/json', () => {
+  it('res.json() includes application/json in the Content-Type header', async () => {
+    const router = createRouter();
+    router.get('/data', (_req, res) => res.json({ ok: true }));
+    const r = await makeRequest(router, { url: '/data' });
+    assert.ok(
+      (r.headers['content-type'] as string)?.includes('application/json'),
+      `Expected application/json in Content-Type, got: ${r.headers['content-type']}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 

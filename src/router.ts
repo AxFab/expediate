@@ -21,8 +21,10 @@
 'use strict';
 
 import * as crypto from 'crypto';
-import * as http from 'http';
-import * as https from 'https';
+import * as http   from 'http';
+import * as https  from 'https';
+import * as http2  from 'http2';
+import * as net    from 'net';
 import { BodyOptions, FormPart, parseMultipartBody, extractCharset, readReqBody } from './misc';
 
 // ---------------------------------------------------------------------------
@@ -50,6 +52,22 @@ interface RouterOptions {
    * ```
    */
   secret?: string;
+
+  /**
+   * Global request timeout in milliseconds.
+   *
+   * When a request handler does not start writing a response within this
+   * period, the socket is marked idle and a **408 Request Timeout** response
+   * is sent automatically.  The timeout is reset on every response write.
+   *
+   * Set to `0` or omit to disable the timeout entirely.
+   *
+   * @example
+   * ```ts
+   * const app = createRouter({ timeout: 30_000 }); // 30 s
+   * ```
+   */
+  timeout?: number;
 }
 
 /**
@@ -133,15 +151,18 @@ interface RouterResponse extends http.ServerResponse {
    */
   send(data?: string): void;
 
+  /** Serialise `data` as JSON, set `Content-Type: application/json`, and end. */
+  json(data: unknown): void;
 
-  json (data: unknown):void;
   /**
    * Set the HTTP status code and optional response headers, then return
    * `this` so calls can be chained (e.g. `res.status(404).end(...)`).
    */
   status(code: number, headers?: StringMap): this;
+
   /** Redirect the client to `url` with a 302 Found response. */
   redirect(url: string): void;
+
   /**
    * Append a `Set-Cookie` header for the given `name`/`value` pair.
    * Returns `this` to allow chaining.
@@ -170,10 +191,22 @@ interface CookieOptions {
   sameSite?: 'Strict' | 'Lax' | 'None';
 }
 
-/** Options for HTTPS servers passed to `router.listen()`. */
+/**
+ * Options for HTTPS / HTTP/2 servers passed to `router.listen()`.
+ *
+ * When both `key` and `cert` are present, `listen()` creates a TLS server.
+ * Setting `http2: true` additionally upgrades to HTTP/2 (`http2.createSecureServer`).
+ */
 interface TlsOptions {
   key: string | Buffer;
   cert: string | Buffer;
+  /**
+   * When `true`, an HTTP/2 secure server (`http2.createSecureServer`) is
+   * created instead of an HTTPS/1.1 server.  Requires `key` and `cert`.
+   * The existing middleware API is compatible with HTTP/2 request/response
+   * objects at runtime.
+   */
+  http2?: boolean;
   [key: string]: unknown;
 }
 
@@ -187,8 +220,42 @@ type Middleware = (
   next: NextFunction,
 ) => void;
 
-/** Callback used to pass control to the next matching middleware. */
-type NextFunction = () => void;
+/**
+ * Callback used to pass control to the next matching middleware.
+ *
+ * When called **without** arguments (or with `undefined`), the router
+ * continues to the next matching layer as usual.
+ *
+ * When called **with** a non-null argument, the argument is treated as an
+ * error: remaining middleware and routes are skipped and the handler
+ * registered via {@link Router.onError} is invoked.  If no error handler
+ * has been registered, a plain **500** response is sent.
+ *
+ * @example
+ * ```ts
+ * router.use('/protected', (req, _res, next) => {
+ *   if (!req.headers.authorization) return next(new Error('Unauthorized'));
+ *   next(); // proceed normally
+ * });
+ * ```
+ */
+type NextFunction = (err?: unknown) => void;
+
+/**
+ * Handler invoked when a middleware throws, an async middleware rejects,
+ * or `next(err)` is called with a non-null argument.
+ *
+ * Register it with {@link Router.onError}.
+ *
+ * @param err - The thrown value or the argument passed to `next()`.
+ * @param req - The current request.
+ * @param res - The current response (not yet ended — the handler must end it).
+ */
+type ErrorHandler = (
+  err: unknown,
+  req: RouterRequest,
+  res: RouterResponse,
+) => void;
 
 /**
  * A value that can be registered as a route handler: a single `Middleware`
@@ -196,6 +263,22 @@ type NextFunction = () => void;
  * of either. Arrays may not be nested.
  */
 type MiddlewareArg = Middleware | Router | (Middleware | Router)[];
+
+/**
+ * Sanitised description of a single registered route, as returned by
+ * {@link Router.routes}.
+ */
+interface RouteInfo {
+  /** HTTP method this layer is restricted to, or `null` for any method. */
+  method: string | null;
+  /** The original path pattern as supplied by the caller. */
+  path: string | RegExp;
+  /**
+   * `true` for prefix-style (`use`) registrations where the matched prefix
+   * is stripped from `req.path`; `false` for exact-method routes.
+   */
+  stripPath: boolean;
+}
 
 /**
  * Internal representation of a single registered route.
@@ -245,15 +328,41 @@ interface Layer {
  */
 interface Router {
   /**
-   * Register middleware for all HTTP methods, scoped to `path`.
-   * The matched path prefix is stripped from `req.path` before the middleware
-   * is invoked, so nested routers only see the remaining suffix.
-   * Equivalent to Express's `app.use()`.
+   * The path prefix this router was created with, if any.
+   *
+   * Set by passing a string as the first argument to `createRouter()`:
+   * ```ts
+   * const v1 = createRouter('/api/v1');
+   * console.log(v1.prefix); // '/api/v1'
+   * ```
+   * When a prefixed router is passed to `parent.use(v1)`, the parent uses
+   * this prefix as the mount path automatically.
    */
-  use(path: string | RegExp, ...args: MiddlewareArg[]): void;
+  readonly prefix?: string;
+
   /**
-   * Register middleware for all HTTP methods.
-   * Unlike `use`, it doesn't strips the matched prefix from `req.path`.
+   * Register prefix-style middleware scoped to `path`.
+   *
+   * The matched path prefix is stripped from `req.path` before the middleware
+   * runs, so nested routers only see the remaining suffix.
+   * Equivalent to Express's `app.use()`.
+   *
+   * **No-path shortcut:** when the first argument is a `Router` or `Middleware`
+   * (not a string or RegExp), the path defaults to the router's own
+   * {@link prefix} (or `'/'` if no prefix was set).  This lets you mount a
+   * prefixed sub-router without repeating the path:
+   *
+   * ```ts
+   * const v1 = createRouter('/api/v1');
+   * v1.get('/users', handler);
+   * app.use(v1); // same as app.use('/api/v1', v1)
+   * ```
+   */
+  use(path: string | RegExp | MiddlewareArg, ...args: MiddlewareArg[]): void;
+
+  /**
+   * Register middleware for all HTTP methods without stripping `req.path`.
+   * Unlike `use`, the full path remains visible to every chained middleware.
    */
   all(path: string | RegExp, ...args: MiddlewareArg[]): void;
   /** Register middleware for `GET` requests. */
@@ -266,25 +375,109 @@ interface Router {
   delete(path: string | RegExp, ...args: MiddlewareArg[]): void;
   /** Register middleware for `PATCH` requests. */
   patch(path: string | RegExp, ...args: MiddlewareArg[]): void;
+
   /**
-   * Start listening on the given port and return the underlying server instance.
+   * Register a global error handler for this router.
    *
-   * The returned server can be used for graceful shutdown (`server.close()`),
-   * discovering the OS-assigned port when `port` is `0`
-   * (`(server.address() as AddressInfo).port`), or attaching extra event
-   * listeners.
+   * The handler is called whenever:
+   * - A middleware throws synchronously.
+   * - An `async` middleware returns a rejected `Promise`.
+   * - Any middleware calls `next(err)` with a non-null argument.
    *
-   * When `opts` contains both `key` and `cert`, an HTTPS server is created;
-   * otherwise a plain HTTP server is used.
-   *
-   * @returns The `http.Server` or `https.Server` instance.
+   * Only one handler is active at a time; subsequent calls replace the
+   * previous one.  The handler **must** end the response.
    *
    * @example
    * ```ts
-   * // Graceful shutdown
-   * const server = router.listen(3000, () => console.log('Listening'));
-   * process.on('SIGTERM', () => server.close());
+   * app.onError((err, _req, res) => {
+   *   const status = (err as any)?.status ?? 500;
+   *   res.status(status).json({ error: String(err) });
+   * });
+   * ```
+   */
+  onError(handler: ErrorHandler): void;
+
+  /**
+   * Register a custom handler for requests that match no registered route.
    *
+   * When no route matches and no `done()` callback was supplied to the
+   * listener, this handler is invoked instead of the built-in
+   * `Cannot METHOD /path` 404 response.
+   *
+   * Registering a not-found handler is an explicit, documented alternative to
+   * the `app.all('*', handler)` workaround — without the subtle path-stripping
+   * interactions that glob `use()` layers introduce.
+   *
+   * @example
+   * ```ts
+   * app.setNotFound((_req, res) =>
+   *   res.status(404).json({ error: 'Not Found' }));
+   * ```
+   */
+  setNotFound(handler: Middleware): void;
+
+  /**
+   * Return a read-only snapshot of all routes registered on this router.
+   *
+   * Useful for tooling, documentation generation, and debugging.  The array
+   * is a fresh copy — mutating it does not affect the live route table.
+   *
+   * @returns An array of {@link RouteInfo} objects, one per registered layer,
+   *   in registration order.
+   *
+   * @example
+   * ```ts
+   * app.get('/users', handler);
+   * app.post('/users', handler);
+   * console.log(app.routes());
+   * // [
+   * //   { method: 'GET',  path: '/users', stripPath: false },
+   * //   { method: 'POST', path: '/users', stripPath: false },
+   * // ]
+   * ```
+   */
+  routes(): RouteInfo[];
+
+  /**
+   * Gracefully shut down the HTTP(S) server created by `router.listen()`.
+   *
+   * Stops accepting new connections and waits for all existing connections to
+   * close naturally.  After `timeout` milliseconds, any remaining sockets are
+   * forcibly destroyed so the process is not kept alive indefinitely.
+   *
+   * If `router.listen()` was never called on this router (e.g. it is a
+   * sub-router mounted inside a parent), `shutdown()` resolves immediately
+   * without doing anything.
+   *
+   * @param timeout - Grace period in milliseconds before sockets are forcibly
+   *   destroyed.  Defaults to `5000`.  Pass `0` to skip the forced teardown.
+   * @returns A `Promise` that resolves when the server has fully stopped.
+   *
+   * @example
+   * ```ts
+   * const app = createRouter();
+   * app.listen(3000);
+   * process.on('SIGTERM', () => app.shutdown(10_000));
+   * ```
+   */
+  shutdown(timeout?: number): Promise<void>;
+
+  /**
+   * Start listening on the given port and return the underlying server instance.
+   *
+   * When `opts` contains both `key` and `cert`:
+   * - An **HTTPS** server is created (TLS, HTTP/1.1).
+   * - Setting `opts.http2 = true` additionally upgrades to **HTTP/2**
+   *   (`http2.createSecureServer`).
+   *
+   * When `opts` is absent or contains neither key nor cert, a plain **HTTP**
+   * server is used.
+   *
+   * @returns The underlying server instance.  Use it for graceful shutdown,
+   *   port discovery, or attaching additional event listeners.
+   *
+   * @example
+   * ```ts
    * // Discover the OS-assigned ephemeral port
    * const server = router.listen(0, () => {
    *   const { port } = server.address() as AddressInfo;
@@ -292,7 +485,12 @@ interface Router {
    * });
    * ```
    */
-  listen(port: number, opts?: TlsOptions | (() => void), cb?: () => void): http.Server | https.Server;
+  listen(
+    port: number,
+    opts?: TlsOptions | (() => void),
+    cb?: () => void,
+  ): http.Server | https.Server | http2.Http2SecureServer;
+
   /**
    * The underlying `(req, res, next)` function, allowing this router to be
    * mounted as middleware inside another router:
@@ -584,12 +782,14 @@ function verifyCookieValue(signed: string, secret: string): string | false {
  *
  * **Helpers added to `res`:**
  * - `send(data?)`             — write `data` and end the response.
+ * - `json(data)`              — serialise to JSON and end.
  * - `status(code, headers?)`  — set the status code and optional headers.
  * - `redirect(url)`           — issue a 302 redirect.
  * - `cookie(name, val, opts)` — append a `Set-Cookie` header.
  *
- * @param req - The raw incoming message to augment.
- * @param res - The raw server response to augment.
+ * @param req    - The raw incoming message to augment.
+ * @param res    - The raw server response to augment.
+ * @param secret - Optional cookie-signing secret.
  */
 function updateHttpObjects(
   req:    http.IncomingMessage,
@@ -713,6 +913,7 @@ function updateHttpObjects(
   };
 
   rRes.json = (data: unknown): void => {
+    res.setHeader('Content-Type', 'application/json');
     res.write(JSON.stringify(data));
     res.end();
   };
@@ -800,7 +1001,7 @@ function pathMatchesLayer(layer: Layer, path: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Route registration
+// Route registration helpers
 // ---------------------------------------------------------------------------
 
 /**
@@ -816,11 +1017,7 @@ function pathMatchesLayer(layer: Layer, path: string): boolean {
  * @param method    - HTTP method string or `null` for method-agnostic layers.
  * @param path      - URL pattern (plain string, glob, or `RegExp`).
  * @param arg       - The middleware value(s) to register.
- * @param stripPath - Forwarded to `buildRouteLayer`. Pass `true` for prefix-
- *                    style registrations (`use`) so the matched prefix
- *                    is stripped from `req.path`, and `false` for exact-method
- *                    routes so that chained middlewares sharing the same path
- *                    each see the unmodified path.
+ * @param stripPath - Forwarded to `buildRouteLayer`.
  * @throws {TypeError} When `arg` contains a value that cannot be resolved to
  *                     a `Middleware` function.
  */
@@ -846,6 +1043,25 @@ function registerRoute(
   }
 }
 
+/**
+ * If `arg` is a `Router` instance, return its configured {@link Router.prefix};
+ * otherwise return `undefined`.
+ *
+ * Used by `router.use()` to infer the mount path when no explicit path is
+ * provided:
+ * ```ts
+ * const v1 = createRouter('/api/v1');
+ * app.use(v1); // prefix '/api/v1' is inferred automatically
+ * ```
+ *
+ * @param arg - The first argument passed to `router.use()`.
+ * @returns The router's prefix string, or `undefined`.
+ */
+function extractRouterPrefix(arg: MiddlewareArg): string | undefined {
+  if (Array.isArray(arg) || typeof arg === 'function') return undefined;
+  return (arg as Router).prefix;
+}
+
 // ---------------------------------------------------------------------------
 // Router factory
 // ---------------------------------------------------------------------------
@@ -858,63 +1074,88 @@ function registerRoute(
  * mounted inside another router:
  * ```ts
  * parent.use('/api', child);
+ * // or, if child has a prefix:
+ * parent.use(child);
+ * ```
+ *
+ * **Prefix shorthand:**
+ * Pass a path string as the first argument to associate a prefix with this
+ * router.  The prefix is used automatically when the router is mounted via
+ * `parent.use(child)`:
+ * ```ts
+ * const v1 = createRouter('/api/v1');
+ * v1.get('/users', handler);   // handler is reached at /api/v1/users
+ * app.use(v1);                  // same as app.use('/api/v1', v1)
  * ```
  *
  * **Path patterns** accepted by all route-registration methods:
  * - Plain strings with optional `:name` segments — e.g. `'/users/:id'`.
- *   Each `:name` is compiled to a named capture group and exposed in
- *   `req.params` on a match.
  * - Glob strings following `.gitignore` rules — e.g. `'/**\/*.php'`.
- *   Supported wildcards: `?` (one non-slash char), `*` (any non-slash chars),
- *   `**` (any chars, including slashes).
  * - `RegExp` objects — used directly; named groups become route parameters.
  *
- * **Middleware arguments** accept any number of variadic `MiddlewareArg`
- * values, each of which may be:
- * - A `Middleware` function.
- * - A `Router` instance (its `listener` is registered automatically).
- * - An array of either of the above.
+ * **Error handling:**
+ * Register a global error handler with `router.onError()`.  It is called
+ * when any middleware throws, rejects, or calls `next(err)`.
  *
- * **Path stripping behaviour:**
- * - `use` — strip the matched path prefix from `req.path` before
- *   invoking middleware. Nested routers therefore only see the remaining suffix.
- * - `all` / `get` / `post` / `put` / `delete` / `patch` — leave `req.path` intact
- *   so that multiple middlewares registered for the same exact path can each
- *   match and be invoked in sequence via `next()`.
+ * **Graceful shutdown:**
+ * Call `router.shutdown()` to stop the server created by `router.listen()`.
  *
- * @returns A fully initialised `Router` ready to register routes and
- *          optionally start an HTTP or HTTPS server.
+ * @param prefixOrOpts - Optional path prefix string (e.g. `'/api/v1'`) **or**
+ *                       an {@link RouterOptions} object.
+ * @param opts         - Options when `prefixOrOpts` is a string.
+ * @returns A fully initialised `Router`.
  *
  * @example
  * ```ts
- * const auth = createRouter();
- * auth.post('/login',  handleLogin);
- * auth.post('/logout', handleLogout);
+ * const app = createRouter({ secret: process.env.COOKIE_SECRET, timeout: 30_000 });
  *
- * const app = createRouter();
- * app.use('/auth', auth);                              // mount a sub-router
- * app.get('/users/:id', requireAuth, getUser);         // multiple middleware
- * app.get('/**\/*.php', (req, res) =>                 // glob pattern
- *   res.status(403).send('Forbidden'));
+ * const v1 = createRouter('/api/v1');
+ * v1.get('/users', handler);
  *
- * app.listen(3000, () => console.log('Listening on :3000'));
+ * app.use(v1);
+ * app.onError((err, _req, res) => res.status(500).json({ error: String(err) }));
+ * app.setNotFound((_req, res) => res.status(404).json({ error: 'Not Found' }));
+ *
+ * app.listen(3000, () => console.log('Listening'));
+ * process.on('SIGTERM', () => app.shutdown(10_000));
  * ```
  */
-function createRouter(opts?: RouterOptions): Router {
+function createRouter(
+  prefixOrOpts?: string | RouterOptions,
+  opts?: RouterOptions,
+): Router {
+  // Resolve overloaded first argument.
+  const routerPrefix = typeof prefixOrOpts === 'string' ? prefixOrOpts : undefined;
+  const options      = typeof prefixOrOpts === 'object' ? prefixOrOpts : (opts ?? {});
+
+  const secret    = options.secret;
+  const timeoutMs = options.timeout;
+
   const routes: Layer[] = [];
-  const secret = opts?.secret;
+
+  /** Currently registered error handler, or `undefined` for the default 500. */
+  let errorHandler:    ErrorHandler | undefined;
+  /** Currently registered not-found handler, or `undefined` for the default 404. */
+  let notFoundHandler: Middleware   | undefined;
+
+  /** Server created by `router.listen()`, used by `router.shutdown()`. */
+  let activeServer: http.Server | https.Server | http2.Http2SecureServer | null = null;
+  /** All open sockets tracked for forced teardown on shutdown. */
+  const activeSockets = new Set<net.Socket>();
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Core dispatch listener
+  // ──────────────────────────────────────────────────────────────────────────
 
   /**
    * Core dispatch function. Walks the route table in registration order and
    * invokes the first layer that matches the current request.
    *
-   * - **404** — no layer's path matched at all.
-   * - **405 Method Not Allowed** — at least one layer's path matched but no
-   *   layer accepted the request's HTTP method.  The `Allow` response header
-   *   lists every method registered for the matched path.
-   * - **500** — a middleware threw synchronously or returned a rejected
-   *   `Promise`.  Both cases are caught and produce an error response;
-   *   the rejection is never left unhandled.
+   * - **404** (or custom `setNotFound` handler) — no layer's path matched.
+   * - **405 Method Not Allowed** — a layer's path matched but no layer
+   *   accepted the HTTP method.  The `Allow` header lists all registered methods.
+   * - **500** (or custom `onError` handler) — a middleware threw or rejected,
+   *   or `next(err)` was called with a non-null error.
    */
   const listener: Middleware = (
     req: RouterRequest,
@@ -922,45 +1163,77 @@ function createRouter(opts?: RouterOptions): Router {
     done?: NextFunction,
   ): void => {
     const method = req.method;
-    const url = req.url;
+    const url    = req.url;
     let idx = 0;
 
     updateHttpObjects(req, res, secret);
 
-    // ── Centralised error handler (sync throws + async rejections) ──────────
-    const handleError = (e: unknown): void => {
-      console.warn(e);
-      if (!res.writableEnded)
-        res.status(500).end(`Error ${method} ${url}`);
-    };
+    // ── Optional per-request timeout ──────────────────────────────────────
+    // Uses both a socket-level idle timeout (as the transport boundary) and a
+    // wall-clock setTimeout guard.  The wall-clock timer is the primary
+    // mechanism because it is unaffected by the OS socket buffer state;
+    // socket.setTimeout is set in addition so the idle signal propagates down
+    // to keep-alive connections that would otherwise hold the socket open.
+    if (timeoutMs) {
+      if (req.socket) req.socket.setTimeout(timeoutMs);
+      const timer = setTimeout((): void => {
+        if (!res.writableEnded) res.status(408).end('Request Timeout');
+      }, timeoutMs);
+      res.once('finish', () => {
+        clearTimeout(timer);
+        if (req.socket) req.socket.setTimeout(0);
+      });
+    }
 
-    // ── Invoke one middleware, catching both sync throws and async rejects ──
-    const invoke = (mw: Middleware, nextFn: NextFunction): void => {
-      try {
-        const ret = mw(req, res, nextFn) as unknown;
-        if (ret instanceof Promise) ret.catch(handleError);
-      } catch (e) {
-        handleError(e);
+    // ── Centralised error dispatch ─────────────────────────────────────────
+    // Invoked for sync throws, async rejections, and next(err) calls.
+    const invokeErrorHandler = (e: unknown): void => {
+      if (res.writableEnded) return;
+      if (errorHandler) {
+        try {
+          errorHandler(e, req, res);
+        } catch (e2) {
+          if (!res.writableEnded) res.status(500).end(`Error ${method} ${url}`);
+        }
+      } else {
+        console.warn(e);
+        res.status(500).end(`Error ${method} ${url}`);
       }
     };
 
-    // Accumulate methods from layers whose *path* matched but whose *method*
-    // did not, so we can send 405 + Allow rather than a misleading 404.
+    // ── Safe middleware invocation ─────────────────────────────────────────
+    // Catches sync throws AND async rejections, routing both to invokeErrorHandler.
+    const invoke = (mw: Middleware, nextFn: NextFunction): void => {
+      try {
+        const ret = mw(req, res, nextFn) as unknown;
+        if (ret instanceof Promise) ret.catch(invokeErrorHandler);
+      } catch (e) {
+        invokeErrorHandler(e);
+      }
+    };
+
+    // Accumulate methods from layers whose path matched but whose method
+    // did not, for a 405 response with an accurate Allow header.
     const allowedMethods = new Set<string>();
 
-    const next: NextFunction = (): void => {
+    // ── Main dispatch loop ─────────────────────────────────────────────────
+    const next: NextFunction = (err?: unknown): void => {
+      // If an error is passed, skip remaining routes and call error handler.
+      if (err != null) {
+        invokeErrorHandler(err);
+        return;
+      }
+
       while (idx < routes.length) {
-        const layer = routes[idx++];
+        const layer      = routes[idx++];
         const pathBefore = req.path;
 
         if (matchRouteLayer(layer, req, req.path)) {
           if (layer.stripPath) {
-            // For prefix layers (use), save the pre-strip path so we can
-            // restore it if the sub-router calls done() and control returns
-            // here.  Without restoration, subsequent layers in this router
-            // would see the truncated path and fail their own pattern matches.
+            // For prefix layers (use), restore req.path after the sub-router
+            // calls done() so that subsequent sibling layers see the original path.
             invoke(layer.middleware, () => {
-              req.path = pathBefore; // restore for the next sibling layer
+              req.path = pathBefore;
               next();
             });
             return;
@@ -969,49 +1242,51 @@ function createRouter(opts?: RouterOptions): Router {
           return;
         }
 
-        // matchRouteLayer returned false.  Check whether the path itself
-        // matches — if it does, the mismatch was the HTTP method, not the
-        // path, and we should remember the layer's method for a 405 response.
+        // Path matched but method did not → remember for 405 detection.
         if (layer.method !== null && pathMatchesLayer(layer, pathBefore)) {
           allowedMethods.add(layer.method);
         }
       }
 
-      // All layers exhausted without a match.
+      // All layers exhausted without a full match.
       if (allowedMethods.size > 0) {
-        // The path is known but no registered method accepted this request.
+        // Path is registered, but not for this method.
         const allow = [...allowedMethods].sort().join(', ');
         res.status(405, { Allow: allow }).end(`Cannot ${method} ${url}`);
         return;
       }
 
+      // Genuine 404 — delegate to parent router, not-found handler, or default.
       if (done) return done();
+
+      if (notFoundHandler) {
+        try {
+          notFoundHandler(req, res, () => { /* no-op: not-found handler owns response */ });
+        } catch (e) {
+          invokeErrorHandler(e);
+        }
+        return;
+      }
+
       res.status(404).end(`Cannot ${method} ${url}`);
     };
 
     try {
       next();
     } catch (e) {
-      handleError(e);
+      invokeErrorHandler(e);
     }
   };
 
-  // -------------------------------------------------------------------------
-  // Internal helper — produce the uniform registration function for a method.
-  // -------------------------------------------------------------------------
+  // ──────────────────────────────────────────────────────────────────────────
+  // Registration helper for method-specific routes
+  // ──────────────────────────────────────────────────────────────────────────
 
   /**
    * Return the route-registration function used by all HTTP-method helpers.
    *
-   * The produced function accepts a mandatory `path` followed by any number
-   * of `MiddlewareArg` values (functions, `Router` instances, or arrays
-   * thereof), and delegates each to `registerRoute`.
-   *
    * @param method    - HTTP method to restrict layers to, or `null` for any.
-   * @param stripPath - Whether the matched path prefix should be stripped from
-   *                    `req.path` before middleware is invoked. `true` for
-   *                    prefix-style registrations, `false` for exact-method ones.
-   * @returns A variadic route-registration function.
+   * @param stripPath - Whether the matched path prefix should be stripped.
    */
   function makeRegister(method: string | null, stripPath: boolean) {
     return (path: string | RegExp, ...args: MiddlewareArg[]): void => {
@@ -1019,39 +1294,124 @@ function createRouter(opts?: RouterOptions): Router {
     };
   }
 
-  // -------------------------------------------------------------------------
-  // Public router API
-  // -------------------------------------------------------------------------
+  // ──────────────────────────────────────────────────────────────────────────
+  // `use()` — supports both path-first and no-path (Router-first) forms
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Register prefix-style middleware.  Accepts:
+   * 1. `use(path, ...middlewares)` — explicit path.
+   * 2. `use(routerOrMiddleware, ...more)` — infers path from Router.prefix or '/'.
+   */
+  const use = (
+    pathOrFirst: string | RegExp | MiddlewareArg,
+    ...args: MiddlewareArg[]
+  ): void => {
+    if (typeof pathOrFirst === 'string' || pathOrFirst instanceof RegExp) {
+      // Normal form: explicit path string or RegExp.
+      for (const arg of args) registerRoute(routes, null, pathOrFirst, arg, true);
+    } else {
+      // No explicit path: the first argument is itself a middleware / Router.
+      // Infer mount path from the Router's prefix, or default to '/'.
+      const inferredPath = extractRouterPrefix(pathOrFirst as MiddlewareArg) ?? '/';
+      registerRoute(routes, null, inferredPath, pathOrFirst as MiddlewareArg, true);
+      for (const arg of args) registerRoute(routes, null, '/', arg, true);
+    }
+  };
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Public router object
+  // ──────────────────────────────────────────────────────────────────────────
 
   const router: Router = {
+    prefix: routerPrefix,
     listener,
-    use:    makeRegister(null,     true),   // prefix — strip path
-    all:    makeRegister(null,     false),  // exact  — keep path
+
+    use,
+    all:    makeRegister(null,     false),
     get:    makeRegister('GET',    false),
     put:    makeRegister('PUT',    false),
     post:   makeRegister('POST',   false),
     delete: makeRegister('DELETE', false),
     patch:  makeRegister('PATCH',  false),
 
+    // ── onError ─────────────────────────────────────────────────────────────
+    onError(handler: ErrorHandler): void {
+      errorHandler = handler;
+    },
+
+    // ── setNotFound ──────────────────────────────────────────────────────────
+    setNotFound(handler: Middleware): void {
+      notFoundHandler = handler;
+    },
+
+    // ── routes ───────────────────────────────────────────────────────────────
+    routes(): RouteInfo[] {
+      return routes.map((l) => ({
+        method:    l.method,
+        path:      l.path,
+        stripPath: l.stripPath,
+      }));
+    },
+
+    // ── shutdown ─────────────────────────────────────────────────────────────
+    shutdown(timeout = 5000): Promise<void> {
+      if (!activeServer) return Promise.resolve();
+
+      return new Promise<void>((resolve, reject) => {
+        // Stop accepting new connections.  Resolves when all existing
+        // connections have been closed (or when forcibly destroyed below).
+        activeServer!.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+
+        // Forcibly destroy any remaining idle sockets after the grace period.
+        if (timeout > 0) {
+          setTimeout(() => {
+            for (const socket of activeSockets) socket.destroy();
+            activeSockets.clear();
+          }, timeout);
+        }
+      });
+    },
+
+    // ── listen ───────────────────────────────────────────────────────────────
     listen(
       port: number,
       opts?: TlsOptions | (() => void),
       cb?: () => void,
-    ): http.Server | https.Server {
+    ): http.Server | https.Server | http2.Http2SecureServer {
       if (typeof opts === 'function') {
-        cb = opts;
+        cb   = opts;
         opts = undefined;
       }
+
       const rawListener = listener as unknown as http.RequestListener;
-      if (opts && (opts as TlsOptions).key && (opts as TlsOptions).cert) {
-        const server = https.createServer(opts as TlsOptions, rawListener);
-        server.listen(port, cb);
-        return server;
+      let server: http.Server | https.Server | http2.Http2SecureServer;
+
+      const tlsOpts = opts as TlsOptions | undefined;
+
+      if (tlsOpts?.key && tlsOpts?.cert) {
+        if (tlsOpts.http2) {
+          // HTTP/2 secure server — same TLS options, different factory.
+          server = http2.createSecureServer(tlsOpts as http2.SecureServerOptions, rawListener as any);
+        } else {
+          server = https.createServer(tlsOpts as https.ServerOptions, rawListener);
+        }
       } else {
-        const server = http.createServer(rawListener);
-        server.listen(port, cb);
-        return server;
+        server = http.createServer(rawListener);
       }
+
+      // Track open sockets so shutdown() can forcibly destroy them.
+      server.on('connection', (socket: net.Socket) => {
+        activeSockets.add(socket);
+        socket.once('close', () => activeSockets.delete(socket));
+      });
+
+      activeServer = server;
+      server.listen(port, cb);
+      return server;
     },
   };
 
@@ -1067,7 +1427,9 @@ export type {
   Middleware,
   MiddlewareArg,
   NextFunction,
+  ErrorHandler,
   Layer,
+  RouteInfo,
   CookieOptions,
   TlsOptions,
   StringMap,

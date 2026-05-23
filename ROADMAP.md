@@ -161,7 +161,7 @@ shutdown, and end-to-end request serving.
 
 ---
 
-#### FIX-13 · Incomplete JSDoc on `gitCreate`
+#### ~~FIX-13 · Incomplete JSDoc on `gitCreate`~~ ✅ Fixed
 
 **File:** `src/git.ts` — `gitCreate()`
 
@@ -206,7 +206,7 @@ auto-detection path via `parseBody()`.
 
 ---
 
-#### FEAT-02 · Graceful shutdown
+#### ~~FEAT-02 · Graceful shutdown~~ ✅ Fixed
 
 There is no way to shut down the server cleanly: drain in-flight requests,
 stop accepting new connections, and wait for all handlers to complete. This is
@@ -229,7 +229,7 @@ semantics, and mixed distinct/repeated keys.
 
 ---
 
-#### FEAT-04 · Global error handler hook
+#### ~~FEAT-04 · Global error handler hook~~ ✅ Fixed
 
 Unlike Express, there is no 4-argument error middleware `(err, req, res, next)`.
 Errors not caught synchronously in the try/catch produce raw 500 responses with
@@ -259,7 +259,7 @@ content (HTML, JSON, CSS).
 
 ### 🟠 High
 
-#### FEAT-06 · Router base path (prefix)
+#### ~~FEAT-06 · Router base path (prefix)~~ ✅ Fixed
 
 Registering a sub-router always requires spelling out the full prefix on every
 call. There is no way to create a router that is inherently scoped to a base path.
@@ -274,7 +274,7 @@ app.use(v1);
 
 ---
 
-#### FEAT-07 · `next(err)` error propagation
+#### ~~FEAT-07 · `next(err)` error propagation~~ ✅ Fixed
 
 `NextFunction` is `() => void`. Express-style `next(err)` — where passing an
 argument skips remaining middleware and routes to the error handler — is not
@@ -334,7 +334,7 @@ headers, and the 413 size-limit throw.
 
 ---
 
-#### FEAT-12 · Route introspection
+#### ~~FEAT-12 · Route introspection~~ ✅ Fixed
 
 There is currently no way to enumerate the routes registered on a router — not
 for debugging, not for generating documentation, and not for OpenAPI generation.
@@ -405,7 +405,7 @@ an example in the README).
 
 ---
 
-#### FEAT-18 · Built-in request timeout
+#### ~~FEAT-18 · Built-in request timeout~~ ✅ Fixed
 
 Long-running or stalled requests tie up server resources indefinitely. Without
 a configurable global timeout the server is vulnerable to slow-client attacks.
@@ -445,7 +445,7 @@ handshake and manages the WebSocket lifecycle, or at minimum expose
 
 ---
 
-#### NTH-03 · HTTP/2 support
+#### ~~NTH-03 · HTTP/2 support~~ ✅ Fixed
 
 The `listen()` helper hard-codes `http.createServer` / `https.createServer`.
 HTTP/2 (`http2.createSecureServer`) is not available at all.
@@ -502,7 +502,7 @@ and short-circuits with 304 when they match.
 
 ---
 
-#### NTH-09 · `router.all('*', notFoundHandler)` catch-all convention
+#### ~~NTH-09 · `router.all('*', notFoundHandler)` catch-all convention~~ ✅ Fixed
 
 The built-in 404 sends a plain-text `Cannot METHOD /path`. Applications that
 return JSON errors from their API need to replace this with a custom handler.
@@ -558,35 +558,35 @@ single-host deployments.
 |~~FIX-10~~| Bug         | ✅       | `BodyOptions.strict` not enforced               |
 | FIX-11   | Bug         | 🟡       | Directory listing unsorted                      |
 |~~FIX-12~~| Bug         | ✅       | `listen()` exposes no server handle             |
-| FIX-13   | Bug         | 🟡       | Incomplete JSDoc on `gitCreate`                 |
+|~~FIX-13~~| Bug         | 🟡       | Incomplete JSDoc on `gitCreate`                 |
 | FIX-14   | Bug         | 🟡       | `refreshTokenSecret` is a no-op field           |
 |~~FEAT-01~~| Feature    | ✅       | `application/x-www-form-urlencoded` parser      |
-| FEAT-02  | Feature     | 🔴       | Graceful shutdown                               |
+|~~FEAT-02~~| Feature    | 🔴       | Graceful shutdown                               |
 |~~FEAT-03~~| Feature    | ✅       | Query-string array support                      |
-| FEAT-04  | Feature     | 🔴       | Global error handler hook                       |
+|~~FEAT-04~~| Feature    | 🔴       | Global error handler hook                       |
 | FEAT-05  | Feature     | 🔴       | Response compression middleware                 |
-| FEAT-06  | Feature     | 🟠       | Router base path / prefix                       |
-| FEAT-07  | Feature     | 🟠       | `next(err)` error propagation                   |
+|~~FEAT-06~~| Feature    | 🟠       | Router base path / prefix                       |
+|~~FEAT-07~~| Feature    | 🟠       | `next(err)` error propagation                   |
 | FEAT-08  | Feature     | 🟠       | `req.ip` and proxy trust setting                |
 | FEAT-09  | Feature     | 🟠       | Request ID middleware                           |
 | FEAT-10  | Feature     | 🟠       | `res.download()` helper                         |
 |~~FEAT-11~~| Feature    | ✅       | Multipart streaming for large uploads           |
-| FEAT-12  | Feature     | 🟠       | Route introspection (`router.routes()`)         |
+|~~FEAT-12~~| Feature    | 🟠       | Route introspection (`router.routes()`)         |
 | FEAT-13  | Feature     | 🟡       | ESM / dual-package build                        |
 | FEAT-14  | Feature     | 🟡       | `res.type()` convenience helper                 |
 | FEAT-15  | Feature     | 🟡       | Path parameter type constraints                 |
 | FEAT-16  | Feature     | 🟡       | JWT asymmetric algorithm support                |
 | FEAT-17  | Feature     | 🟡       | Documented pluggable refresh token store        |
-| FEAT-18  | Feature     | 🟡       | Built-in request timeout                        |
+|~~FEAT-18~~| Feature    | 🟡       | Built-in request timeout                        |
 | NTH-01   | Nice-to-have| —        | OpenAPI / Swagger spec generation               |
 | NTH-02   | Nice-to-have| —        | WebSocket upgrade support                       |
-| NTH-03   | Nice-to-have| —        | HTTP/2 support                                  |
+|~~NTH-03~~| Nice-to-have| —        | HTTP/2 support                                  |
 | NTH-04   | Nice-to-have| —        | Rate limiting middleware                        |
 | NTH-05   | Nice-to-have| —        | Response caching middleware                     |
 | NTH-06   | Nice-to-have| —        | CSRF protection middleware                      |
 | NTH-07   | Nice-to-have| —        | Helmet-style security headers middleware        |
 | NTH-08   | Nice-to-have| —        | ETag / conditional-GET for dynamic responses    |
-| NTH-09   | Nice-to-have| —        | Documented 404 override pattern                 |
+|~~NTH-09~~| Nice-to-have| —        | Documented 404 override pattern                 |
 | NTH-10   | Nice-to-have| —        | CLI scaffold (`npx expediate init`)             |
 | NTH-11   | Nice-to-have| —        | Request body schema validation hook             |
 | NTH-12   | Nice-to-have| —        | Cluster / multi-process helper                  |
