@@ -76,14 +76,37 @@ export interface GitHandlerOptions {
 
 export interface GitCreateOption {
   /**
-   * Directory that contains the `git-upload-pack` executable, including a
-   * trailing path separator (e.g. `'/usr/lib/git-core/'`).
+   * Directory that contains the `git` executable, including a trailing path
+   * separator (e.g. `'/usr/lib/git-core/'`).
    *
    * Leave empty (default) to locate the binary via the system `PATH`.
    */
   gitPath?: string;
 
+  /**
+   * Human-readable description written to the repository's `description` file.
+   *
+   * For a bare repository the file is at `<gitDirectory>/description`.
+   * For a working-tree repository the file is at `<gitDirectory>/.git/description`.
+   *
+   * When omitted, no description file is written and Git's default placeholder
+   * text is left in place.
+   */
   description?: string;
+
+  /**
+   * When `true` (the default), the repository is initialised as a **bare**
+   * repository — no working tree is created and Git objects are stored directly
+   * inside `gitDirectory`.  Bare repositories are the standard choice for
+   * server-side hosting because they cannot be accidentally modified by editing
+   * files directly.
+   *
+   * When `false`, a regular repository with a working tree is created (equivalent
+   * to running `git init <gitDirectory>` on the command line).
+   *
+   * @default true
+   */
+  bare?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,24 +311,54 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
 }
 
 /**
+ * Initialise a new Git repository at `gitDirectory` by running `git init`.
  *
- * @param gitDirectory
- * @param opt
- * @returns
+ * By default a **bare** repository is created (no working tree), which is the
+ * conventional layout for server-side hosting.  Pass `{ bare: false }` to
+ * create a standard repository with a working tree instead.
+ *
+ * @param gitDirectory - Absolute filesystem path of the directory in which
+ *   the repository will be created.  The directory is created by Git if it
+ *   does not already exist.
+ * @param opt - Creation options.  All fields are optional.
+ * @param opt.gitPath - Directory containing the `git` binary (with trailing
+ *   separator).  Defaults to `''` so that the system `PATH` is used.
+ * @param opt.bare - When `true` (default) a bare repository is created
+ *   (`git init --bare`).  When `false` a regular working-tree repository is
+ *   created (`git init`).
+ * @param opt.description - Text written to the repository's `description`
+ *   file after initialisation.  Bare: `<gitDirectory>/description`;
+ *   non-bare: `<gitDirectory>/.git/description`.  Skipped when omitted.
+ * @returns A `Promise` that resolves when the repository has been
+ *   successfully created, or rejects with an error message string when the
+ *   `git` process fails to start or exits with a non-zero code.
+ *
+ * @example
+ * ```ts
+ * // Create a bare repository (default — suitable for server hosting)
+ * await gitCreate('/srv/git/myproject.git', { description: 'My project' });
+ *
+ * // Create a regular repository with a working tree
+ * await gitCreate('/home/user/myproject', { bare: false });
+ * ```
  */
-export function gitCreate(gitDirectory:string, opt:GitCreateOption): Promise<void> {
+export function gitCreate(gitDirectory: string, opt: GitCreateOption): Promise<void> {
 
   return new Promise((resolve, reject) => {
 
     const gitHome = opt.gitPath ?? '';
-    const args = ['init', '--bare', gitDirectory];
+    const isBare  = opt.bare !== false; // default true
+    const args    = isBare
+      ? ['init', '--bare', gitDirectory]
+      : ['init', gitDirectory];
+
     const proc = spawn(gitHome + 'git', args, {
-      env: { ...process.env, },
+      env: { ...process.env },
     });
 
     proc.on('error', (err) => {
       console.error(`[git init] spawn error:`, err.message);
-      reject(`git unavailable: ${err.message}`)
+      reject(`git unavailable: ${err.message}`);
     });
 
     proc.stdout.on('error', (err) => {
@@ -318,10 +371,16 @@ export function gitCreate(gitDirectory:string, opt:GitCreateOption): Promise<voi
 
     proc.on('close', (code) => {
       if (code !== 0) {
-        return reject(`git failed`)
+        return reject('git failed');
       }
-      if (opt.description)
-        writeFileSync(`${gitDirectory}/description`, opt.description);
+      if (opt.description) {
+        // Bare repos store the description at the root; working-tree repos
+        // store it inside the hidden .git sub-directory.
+        const descPath = isBare
+          ? `${gitDirectory}/description`
+          : `${gitDirectory}/.git/description`;
+        writeFileSync(descPath, opt.description);
+      }
       resolve();
     });
 

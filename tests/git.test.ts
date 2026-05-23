@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import zlib         from 'node:zlib';
 
 import createRouter       from '../src/router.ts';
-import { gitHandler }     from '../src/git.ts';
+import { gitHandler, gitCreate } from '../src/git.ts';
 import type { GitHandlerOptions } from '../src/git.ts';
 import type { RouterRequest } from '../src/router.ts';
 
@@ -571,7 +571,104 @@ describe('unrecognised routes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite 8 — End-to-end: actual git clone
+// Suite 8 — gitCreate()
+// ---------------------------------------------------------------------------
+
+describe('gitCreate()', () => {
+  /** Create a unique temporary directory and return its path. */
+  function tmpDir(prefix: string): string {
+    return fs.mkdtempSync(path.join(fs.realpathSync('/tmp'), prefix));
+  }
+
+  it('creates a bare repository by default (opt.bare omitted)', async () => {
+    const dir = tmpDir('git-create-bare-');
+    fs.rmdirSync(dir); // git init will recreate it
+    await gitCreate(dir, {});
+    // A bare repo contains a HEAD file at the root level.
+    assert.ok(
+      fs.existsSync(path.join(dir, 'HEAD')),
+      'Expected HEAD at root of bare repository',
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('creates a bare repository when opt.bare is true', async () => {
+    const dir = tmpDir('git-create-bare-explicit-');
+    fs.rmdirSync(dir);
+    await gitCreate(dir, { bare: true });
+    assert.ok(
+      fs.existsSync(path.join(dir, 'HEAD')),
+      'Expected HEAD at root of bare repository',
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('creates a working-tree repository when opt.bare is false', async () => {
+    const dir = tmpDir('git-create-wt-');
+    fs.rmdirSync(dir);
+    await gitCreate(dir, { bare: false });
+    // A working-tree repo has a .git sub-directory containing HEAD.
+    assert.ok(
+      fs.existsSync(path.join(dir, '.git', 'HEAD')),
+      'Expected .git/HEAD in working-tree repository',
+    );
+    // The root itself must NOT contain a bare HEAD file.
+    assert.ok(
+      !fs.existsSync(path.join(dir, 'objects')),
+      'Working-tree root should not contain git object store',
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes the description file in a bare repository', async () => {
+    const dir = tmpDir('git-create-desc-bare-');
+    fs.rmdirSync(dir);
+    await gitCreate(dir, { description: 'My bare repo description' });
+    const content = fs.readFileSync(path.join(dir, 'description'), 'utf8');
+    assert.equal(content, 'My bare repo description');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes the description file in a working-tree repository', async () => {
+    const dir = tmpDir('git-create-desc-wt-');
+    fs.rmdirSync(dir);
+    await gitCreate(dir, { bare: false, description: 'My working-tree repo' });
+    const content = fs.readFileSync(path.join(dir, '.git', 'description'), 'utf8');
+    assert.equal(content, 'My working-tree repo');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not write a description file when opt.description is omitted', async () => {
+    const dir = tmpDir('git-create-no-desc-');
+    fs.rmdirSync(dir);
+    await gitCreate(dir, {});
+    // The default Git placeholder must NOT equal our custom text.
+    const content = fs.readFileSync(path.join(dir, 'description'), 'utf8');
+    assert.ok(
+      !content.includes('My'),
+      'description file should contain Git default, not a custom value',
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects when the git binary is not found (bad gitPath)', async () => {
+    const dir = tmpDir('git-create-fail-');
+    fs.rmdirSync(dir);
+    await assert.rejects(
+      () => gitCreate(dir, { gitPath: '/nonexistent/path/' }),
+      (err: unknown) => {
+        assert.ok(typeof err === 'string' && err.includes('git unavailable'));
+        return true;
+      },
+    );
+    // dir may or may not exist depending on when the error fires — clean up
+    // defensively.
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 9 — End-to-end: actual git clone
 // ---------------------------------------------------------------------------
 
 // describe('end-to-end: git clone over HTTP', () => {
