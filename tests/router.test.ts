@@ -1564,14 +1564,14 @@ describe('req.text() / req.formData() extension methods (Task #18)', () => {
     assert.equal(r.body, 'null');
   });
 
-  it('req.json() rejects with { httpStatus: 400 } for invalid JSON', async () => {
+  it('req.json() rejects with { status: 400 } for invalid JSON', async () => {
     const router = createRouter();
     let errorStatus = 0;
     router.post('/', async (req, res) => {
       try {
         await req.json();
       } catch (e: any) {
-        errorStatus = e.httpStatus ?? 0;
+        errorStatus = e.status ?? 0;
       }
       (res as any).status(200).send('caught');
     });
@@ -1579,7 +1579,7 @@ describe('req.text() / req.formData() extension methods (Task #18)', () => {
       body:    Buffer.from('{bad json}'),
       headers: { 'content-type': 'application/json' },
     });
-    assert.equal(errorStatus, 400, 'FIX-09: should reject with httpStatus 400');
+    assert.equal(errorStatus, 400, 'FIX-09: should reject with status 400');
   });
 
   it('req.formData() parses multipart body and returns FormPart[]', async () => {
@@ -1613,14 +1613,14 @@ describe('req.text() / req.formData() extension methods (Task #18)', () => {
     assert.equal(r.body, 'null');
   });
 
-  it('req.text() rejects with { httpStatus: 413 } when body exceeds limit', async () => {
+  it('req.text() rejects with { status: 413 } when body exceeds limit', async () => {
     const router = createRouter();
     let errorStatus = 0;
     router.post('/', async (req, res) => {
       try {
         await req.text({ limit: '5b' });
       } catch (e: any) {
-        errorStatus = e.httpStatus ?? 0;
+        errorStatus = e.status ?? 0;
       }
       (res as any).status(200).send('caught');
     });
@@ -1628,7 +1628,7 @@ describe('req.text() / req.formData() extension methods (Task #18)', () => {
       body:    Buffer.from('way too large for 5 bytes'),
       headers: { 'content-type': 'text/plain' },
     });
-    assert.equal(errorStatus, 413, 'FIX-09: should reject with httpStatus 413');
+    assert.equal(errorStatus, 413, 'FIX-09: should reject with status 413');
   });
 });
 

@@ -32,13 +32,13 @@ import type { RouterRequest, RouterResponse, Router } from './router.js';
  *
  * When a service method throws or rejects with an object of this shape, the
  * framework translates it into an HTTP error response automatically:
- * - `httpStatus` → HTTP status code (defaults to `500`).
+ * - `status` → HTTP status code (defaults to `500`).
  * - `data`       → JSON-serialised response body (takes precedence over `message`).
  * - `message`    → Plain-text response body.
  */
 export interface ApiError {
   /** HTTP status code to send (e.g. `404`, `503`). Defaults to `500`. */
-  httpStatus?: number;
+  status?: number;
   /** Structured error payload; serialised to JSON when present. */
   data?: unknown;
   /** Human-readable error message used when `data` is absent. */
@@ -277,7 +277,7 @@ function sendJson(res: RouterResponse, data: unknown): void {
  * Translate a caught error (thrown or rejected by a service method) into an
  * HTTP error response.
  *
- * Expected shape: `{ httpStatus?, data?, message? }` (see {@link ApiError}).
+ * Expected shape: `{ status?, data?, message? }` (see {@link ApiError}).
  * Any other thrown value is treated as an opaque 500 Internal Server Error.
  *
  * @param res - The outgoing response.
@@ -285,7 +285,7 @@ function sendJson(res: RouterResponse, data: unknown): void {
  */
 function sendError(res: RouterResponse, err: unknown): void {
   const e = err as ApiError | undefined;
-  const status = e?.httpStatus ?? 500;
+  const status = e?.status ?? 500;
   if (e?.data !== undefined) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.status(status).send(JSON.stringify(e.data));
@@ -323,9 +323,9 @@ function sendError(res: RouterResponse, err: unknown): void {
  *   `Promise` resolving to one → `201 No Content` (useful for mutations).
  *
  * **Error handling:**
- * - Throwing or rejecting with `{ httpStatus, message }` sends the
+ * - Throwing or rejecting with `{ status, message }` sends the
  *   corresponding HTTP error.
- * - Throwing or rejecting with `{ httpStatus, data }` sends the `data` object
+ * - Throwing or rejecting with `{ status, data }` sends the `data` object
  *   as a JSON body.
  * - Any other thrown value produces `500 Internal Server Error`.
  *

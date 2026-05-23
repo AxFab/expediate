@@ -224,11 +224,11 @@ describe('GET /info/refs', () => {
     assert.equal(r.headers['cache-control'], 'no-cache');
   });
 
-  it('returns 403 when service is not git-upload-pack', async () => {
+  it('returns 403 when service is not git-upload-pack or git-receive-pack', async () => {
     const mw = gitHandler({ repository: () => BARE_REPO });
     const r  = await request(mw, {
       method: 'GET',
-      path:   '/info/refs?service=git-receive-pack',
+      path:   '/info/refs?service=git-loading-pack',
     });
     assert.equal(r.statusCode, 403);
   });
@@ -558,7 +558,7 @@ describe('unrecognised routes', () => {
 
   it('returns 404 for POST on an unknown path', async () => {
     const mw = gitHandler({ repository: () => BARE_REPO });
-    const r  = await request(mw, { method: 'POST', path: '/git-receive-pack',
+    const r  = await request(mw, { method: 'POST', path: '/git-loader-pack',
       headers: { 'content-type': 'application/x-git-receive-pack-request' } });
     assert.equal(r.statusCode, 404);
   });

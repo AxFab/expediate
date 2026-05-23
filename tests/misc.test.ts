@@ -1285,7 +1285,7 @@ describe('streamFormData() (FEAT-11)', () => {
     assert.ok('content-type' in seen, 'content-type should be lowercased');
   });
 
-  it('throws { httpStatus: 413 } when body exceeds the limit', async () => {
+  it('throws { status: 413 } when body exceeds the limit', async () => {
     const body = buildMultipart(BOUNDARY, [
       { headers: { 'Content-Disposition': 'form-data; name="f"' }, body: 'too large' },
     ]);
@@ -1298,7 +1298,7 @@ describe('streamFormData() (FEAT-11)', () => {
       } catch (e) {
         thrown = e;
       }
-      res.status((thrown as any)?.httpStatus ?? 200).end('done');
+      res.status((thrown as any)?.status ?? 200).end('done');
     });
 
     const server = http.createServer((req, res) => {

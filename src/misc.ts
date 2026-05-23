@@ -346,12 +346,12 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
 
     // For requests with a known Content-Length we can reject upfront.
     if (!isChunked && length > maxLength)
-      return reject({ httpStatus: 413, message: 'Content Too Large' });
+      return reject({ status: 413, message: 'Content Too Large' });
 
     // Compression handling.
     const encoding = req.headers['content-encoding'] as string | undefined;
     if (encoding && (opts.inflate === false || !DECOMPRESS_ALGO[encoding]))
-      return reject({ httpStatus: 415, message: 'Unsupported Media Type: Wrong Content-Encoding' });
+      return reject({ status: 415, message: 'Unsupported Media Type: Wrong Content-Encoding' });
 
     // eslint-disable-next-line @typescript-eslint/ban-types
     const decompress =
@@ -360,7 +360,7 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
     // Content-Type validation.
     const contentType = (req.headers['content-type'] as string) ?? '';
     if (mimetype && contentType.split(';')[0].trim() !== mimetype)
-      return reject({ httpStatus: 415, message: 'Unsupported Media Type: Wrong Content-Type' });
+      return reject({ status: 415, message: 'Unsupported Media Type: Wrong Content-Type' });
 
     // Stream collection.
     let data: Buffer | null = Buffer.alloc(0);
@@ -371,7 +371,7 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
       const next_ = Buffer.concat([data, chunk]);
       if (next_.length > maxLength) {
         data = null;
-        reject({ httpStatus: 413, message: 'Content Too Large' });
+        reject({ status: 413, message: 'Content Too Large' });
         return;
       }
       data = next_;
@@ -383,7 +383,7 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
       // zlib types require NonSharedBuffer; Buffer satisfies this at runtime.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       decompress(data as any, (err, decompressed) => {
-        if (err) return reject({ httpStatus: 500, message: err.message });
+        if (err) return reject({ status: 500, message: err.message });
         resolve({ mimetype: contentType ?? '', content: decompressed as Buffer });
       });
     });
@@ -489,7 +489,7 @@ function readBodyAsJson(
  *                      `boundary=<value>`).
  * @param data        - The fully-collected raw body buffer.
  * @returns An array of parsed {@link FormPart} objects.
- * @throws `{ httpStatus: 400, message }` when the `boundary` parameter is absent.
+ * @throws `{ status: 400, message }` when the `boundary` parameter is absent.
  */
 export function parseMultipartBody(contentType: string, data: Buffer): FormPart[] {
   const boundary = contentType
@@ -499,7 +499,7 @@ export function parseMultipartBody(contentType: string, data: Buffer): FormPart[
     ?.substring('boundary='.length);
 
   if (!boundary)
-    throw { httpStatus: 400, message: 'Bad Request: missing multipart boundary' };
+    throw { status: 400, message: 'Bad Request: missing multipart boundary' };
 
   // Wire-level delimiter: each part (after the preamble) is preceded by
   // \r\n--boundary.  We split on this sequence so every resulting slice is
@@ -571,7 +571,7 @@ function readBodyAsFormData(
     (req as any).body = parseMultipartBody(contentType, data);
     next();
   } catch (ex: any) {
-    const status = (ex as any).httpStatus ?? 500;
+    const status = (ex as any).status ?? 500;
     res.status(status).send((ex as any).message ?? String(ex));
   }
 }
@@ -845,8 +845,8 @@ export type FormPartStream = {
  *
  * @param req  - The incoming request (must be a `multipart/form-data` request).
  * @param opts - Optional configuration — only `limit` and `inflate` are used.
- * @throws `{ httpStatus: 400, message }` when the `boundary` parameter is absent.
- * @throws `{ httpStatus: 413, message }` when the body exceeds the size limit.
+ * @throws `{ status: 400, message }` when the `boundary` parameter is absent.
+ * @throws `{ status: 413, message }` when the body exceeds the size limit.
  */
 export async function* streamFormData(
   req:  RouterRequest,
@@ -860,7 +860,7 @@ export async function* streamFormData(
 
   for await (const chunk of req as AsyncIterable<Buffer>) {
     totalSize += chunk.length;
-    if (totalSize > maxSize) throw { httpStatus: 413, message: 'Content Too Large' };
+    if (totalSize > maxSize) throw { status: 413, message: 'Content Too Large' };
     chunks.push(chunk);
   }
 

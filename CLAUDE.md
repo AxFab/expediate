@@ -397,7 +397,7 @@ setup: async function() {
 },
 methods: {
   throwIfNotReady() {
-    if (!this.ready) throw { httpStatus: 503, message: 'Not ready' };
+    if (!this.ready) throw { status: 503, message: 'Not ready' };
   }
 }
 ```
@@ -409,7 +409,7 @@ methods: {
 - **Throw / reject with `ApiError`** → HTTP error response:
   ```ts
   interface ApiError {
-    httpStatus?: number;  // default: 500
+    status?: number;  // default: 500
     data?:       unknown; // JSON body (takes precedence over message)
     message?:    string;  // plain text body
   }
@@ -430,7 +430,7 @@ registered before `/items/:id` (score 90). This prevents prefix-match collisions
 
 `apiBuilder` returns a `Router`. Mount it with `app.use('/prefix', apiBuilder(...))` —
 **not** `app.get()`. If you mount without `use()`, the path prefix is NOT
-stripped and route patterns must be absolute. (Tests use `app.use('/', api)` 
+stripped and route patterns must be absolute. (Tests use `app.use('/', api)`
 intentionally to avoid this stripping affecting route resolution in tests.)
 
 ### Body access

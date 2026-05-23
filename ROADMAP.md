@@ -117,11 +117,11 @@ structure.
 #### ~~FIX-09 · `req.json()` rejects with an inconsistent error shape~~ ✅ Fixed
 
 `readReqBody()` in `src/misc.ts` and the `req.json()` extension method in
-`src/router.ts` now consistently reject with `{ httpStatus, message }` (was
+`src/router.ts` now consistently reject with `{ status, message }` (was
 `{ status, message }`). All five rejection sites in `readReqBody` and the
 catch path in `req.json()` were updated. Additionally, `req.text()` and
 `req.formData()` extension methods were added alongside `req.json()`, all
-sharing the same `{ httpStatus, message }` rejection shape. Tests added in
+sharing the same `{ status, message }` rejection shape. Tests added in
 `tests/router.test.ts` (Suite 15) verify the rejection shape for all three
 methods.
 

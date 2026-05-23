@@ -460,11 +460,11 @@ describe('Return value conventions', () => {
 // ---------------------------------------------------------------------------
 
 describe('Error handling', () => {
-  it('thrown { httpStatus, message } → correct HTTP status and plain-text body', async () => {
+  it('thrown { status, message } → correct HTTP status and plain-text body', async () => {
     const service: ServiceDefinition = {
       GET: {
         '/': function () {
-          throw { httpStatus: 404, message: 'Not found' } satisfies ApiError;
+          throw { status: 404, message: 'Not found' } satisfies ApiError;
         },
       },
     };
@@ -473,11 +473,11 @@ describe('Error handling', () => {
     assert.equal(r.body, 'Not found');
   });
 
-  it('thrown { httpStatus, data } → correct status and JSON body', async () => {
+  it('thrown { status, data } → correct status and JSON body', async () => {
     const service: ServiceDefinition = {
       GET: {
         '/': function () {
-          throw { httpStatus: 422, data: { field: 'email', reason: 'invalid' } } satisfies ApiError;
+          throw { status: 422, data: { field: 'email', reason: 'invalid' } } satisfies ApiError;
         },
       },
     };
@@ -486,7 +486,7 @@ describe('Error handling', () => {
     assert.deepEqual(r.json(), { field: 'email', reason: 'invalid' });
   });
 
-  it('thrown ApiError without httpStatus → 500', async () => {
+  it('thrown ApiError without status → 500', async () => {
     const service: ServiceDefinition = {
       GET: {
         '/': function () { throw { message: 'oops' }; },
@@ -497,7 +497,7 @@ describe('Error handling', () => {
     assert.equal(r.body, 'oops');
   });
 
-  it('thrown plain Error (no httpStatus) → 500 with message', async () => {
+  it('thrown plain Error (no status) → 500 with message', async () => {
     const service: ServiceDefinition = {
       GET: {
         '/': function () { throw new Error('Something broke'); },
@@ -508,11 +508,11 @@ describe('Error handling', () => {
     assert.equal(r.body, 'Something broke');
   });
 
-  it('rejected Promise { httpStatus, message } → correct HTTP error', async () => {
+  it('rejected Promise { status, message } → correct HTTP error', async () => {
     const service: ServiceDefinition = {
       GET: {
         '/': function () {
-          return Promise.reject({ httpStatus: 503, message: 'Service unavailable' });
+          return Promise.reject({ status: 503, message: 'Service unavailable' });
         },
       },
     };
@@ -521,11 +521,11 @@ describe('Error handling', () => {
     assert.equal(r.body, 'Service unavailable');
   });
 
-  it('rejected Promise { httpStatus, data } → JSON error body', async () => {
+  it('rejected Promise { status, data } → JSON error body', async () => {
     const service: ServiceDefinition = {
       GET: {
         '/': function () {
-          return Promise.reject({ httpStatus: 404, data: { message: 'Not found', key: 'abc' } });
+          return Promise.reject({ status: 404, data: { message: 'Not found', key: 'abc' } });
         },
       },
     };
@@ -534,7 +534,7 @@ describe('Error handling', () => {
     assert.deepEqual(r.json(), { message: 'Not found', key: 'abc' });
   });
 
-  it('rejected Promise without httpStatus → 500', async () => {
+  it('rejected Promise without status → 500', async () => {
     const service: ServiceDefinition = {
       GET: {
         '/': function () { return Promise.reject(new Error('async boom')); },
@@ -549,7 +549,7 @@ describe('Error handling', () => {
       data:  () => ({ ready: false }),
       methods: {
         throwIfNotReady(this: any) {
-          if (!this.ready) throw { httpStatus: 503, message: 'Not ready' };
+          if (!this.ready) throw { status: 503, message: 'Not ready' };
         },
       },
       GET: {
@@ -676,7 +676,7 @@ describe('Multiple routes on the same service', () => {
     GET: {
       '/items': function (this: any) { return Object.values(this.items); },
       '/items/:id': function (this: any, params: any) {
-        if (!this.items[params.id]) throw { httpStatus: 404, message: 'Not found' };
+        if (!this.items[params.id]) throw { status: 404, message: 'Not found' };
         return this.items[params.id];
       },
     },
@@ -689,7 +689,7 @@ describe('Multiple routes on the same service', () => {
     },
     DELETE: {
       '/items/:id': function (this: any, params: any) {
-        if (!this.items[params.id]) throw { httpStatus: 404, message: 'Not found' };
+        if (!this.items[params.id]) throw { status: 404, message: 'Not found' };
         delete this.items[params.id];
         return undefined; // 201
       },
@@ -743,7 +743,7 @@ describe('Async setup() and service readiness pattern', () => {
       setup: function (this: any) { this.ready = true; },
       methods: {
         throwIfNotReady(this: any) {
-          if (!this.ready) throw { httpStatus: 503, message: 'Not ready' };
+          if (!this.ready) throw { status: 503, message: 'Not ready' };
         },
       },
       GET: {
@@ -766,7 +766,7 @@ describe('Async setup() and service readiness pattern', () => {
       },
       methods: {
         throwIfNotReady(this: any) {
-          if (!this.ready) throw { httpStatus: 503, message: 'Not ready yet' };
+          if (!this.ready) throw { status: 503, message: 'Not ready yet' };
         },
       },
       GET: {

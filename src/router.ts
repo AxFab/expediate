@@ -99,7 +99,7 @@ interface RouterRequest extends http.IncomingMessage {
    * Read and parse the request body as JSON.
    *
    * Returns the parsed value, or `null` when the request has no body.
-   * Rejects with `{ httpStatus, message }` on parse or transport errors.
+   * Rejects with `{ status, message }` on parse or transport errors.
    */
   json(opts?: BodyOptions): Promise<unknown | null>;
 
@@ -108,7 +108,7 @@ interface RouterRequest extends http.IncomingMessage {
    *
    * Returns the body string (decoded using the charset in `Content-Type`,
    * defaulting to UTF-8), or `null` when the request has no body.
-   * Rejects with `{ httpStatus, message }` on transport errors.
+   * Rejects with `{ status, message }` on transport errors.
    */
   text(opts?: BodyOptions): Promise<string | null>;
 
@@ -116,7 +116,7 @@ interface RouterRequest extends http.IncomingMessage {
    * Read and parse the request body as `multipart/form-data`.
    *
    * Returns an array of {@link FormPart} objects, or `null` when the request
-   * has no body.  Rejects with `{ httpStatus, message }` on parse or transport
+   * has no body.  Rejects with `{ status, message }` on parse or transport
    * errors.
    */
   formData(opts?: BodyOptions): Promise<FormPart[] | null>;
@@ -677,7 +677,7 @@ function updateHttpObjects(
           (rReq as any).body = parsed;
           return parsed;
         } catch (ex) {
-          return Promise.reject({ httpStatus: 400, message: 'Bad Request: ' + (ex as Error).message });
+          return Promise.reject({ status: 400, message: 'Bad Request: ' + (ex as Error).message });
         }
       });
   };
@@ -700,7 +700,7 @@ function updateHttpObjects(
           (rReq as any).body = parts;
           return parts;
         } catch (ex: any) {
-          return Promise.reject({ httpStatus: ex.httpStatus ?? 500, message: ex.message ?? String(ex) });
+          return Promise.reject({ status: ex.status ?? 500, message: ex.message ?? String(ex) });
         }
       });
   };

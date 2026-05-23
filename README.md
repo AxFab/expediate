@@ -531,7 +531,7 @@ const todoService: ServiceDefinition<TodoState> = {
   methods: {
     findOrThrow(this: TodoState, id: string) {
       const item = this.items[id];
-      if (!item) throw { httpStatus: 404, message: 'Todo not found' };
+      if (!item) throw { status: 404, message: 'Todo not found' };
       return item;
     },
   },
@@ -571,8 +571,8 @@ app.listen(3000);
 |---|---|
 | Truthy value or `Promise` resolving to one | `200 OK` with JSON body |
 | `undefined`, `null`, `false`, `0`, `''` | `201 No Content` |
-| Throw `{ httpStatus, message }` | `<httpStatus>` with plain-text body |
-| Throw `{ httpStatus, data }` | `<httpStatus>` with JSON body |
+| Throw `{ status, message }` | `<status>` with plain-text body |
+| Throw `{ status, data }` | `<status>` with JSON body |
 | Throw anything else | `500 Internal Server Error` |
 
 ### Scoping
@@ -602,16 +602,16 @@ Throw structured errors from any handler or method to send precise HTTP response
 
 ```ts
 // Plain message
-throw { httpStatus: 404, message: 'Resource not found' };
+throw { status: 404, message: 'Resource not found' };
 
 // JSON body
-throw { httpStatus: 422, data: { field: 'email', error: 'invalid format' } };
+throw { status: 422, data: { field: 'email', error: 'invalid format' } };
 
 // Guard pattern for async setup
 methods: {
   throwIfNotReady(this: any) {
     if (!this.ready)
-      throw { httpStatus: 503, message: 'Service initialising — try again shortly' };
+      throw { status: 503, message: 'Service initialising — try again shortly' };
   },
 },
 setup: function (this: any) {
