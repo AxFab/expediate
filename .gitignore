@@ -10,11 +10,11 @@ dist/
 !*.js
 !*.ts
 !*.html
-!src/*.json
 
-!package.json
+!*.json
 !.git*
 !*.md
 !.npm*
 
 !tests/fixtures/**/*
+.DS_Store
