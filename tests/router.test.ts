@@ -891,7 +891,78 @@ describe('Response helpers', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite 10 — registerRoute error handling
+// Suite 10 — router.listen() return value
+// ---------------------------------------------------------------------------
+
+/**
+ * Start the router on an ephemeral port and return the bound port number.
+ * The caller is responsible for closing the server.
+ */
+function listenEphemeral(router: ReturnType<typeof createRouter>): Promise<{ server: ReturnType<typeof router.listen>, port: number }> {
+  return new Promise((resolve) => {
+    const server = router.listen(0, () => {
+      const port = (server.address() as net.AddressInfo).port;
+      resolve({ server, port });
+    });
+  });
+}
+
+describe('router.listen() server handle', () => {
+  it('returns an object with .close() and .address() methods', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => res.end('ok'));
+    const { server } = await listenEphemeral(router);
+    assert.ok(server, 'listen() must return a value');
+    assert.equal(typeof (server as any).close,   'function', 'returned object must have .close()');
+    assert.equal(typeof (server as any).address, 'function', 'returned object must have .address()');
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('exposes the OS-assigned ephemeral port via server.address()', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => res.end('ok'));
+    const { server, port } = await listenEphemeral(router);
+    assert.ok(typeof port === 'number', 'port must be a number');
+    assert.ok(port > 0, 'OS-assigned port must be greater than 0');
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('can gracefully shut down via server.close()', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => res.end('ok'));
+    const { server } = await listenEphemeral(router);
+    // server.close() resolves cleanly — if it rejects, the test fails
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+  });
+
+  it('serves real HTTP requests on the returned server', async () => {
+    const router = createRouter();
+    router.get('/ping', (_req, res) => res.send('pong'));
+    const { server, port } = await listenEphemeral(router);
+
+    const body = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      const req = http.request(
+        { host: '127.0.0.1', port, method: 'GET', path: '/ping' },
+        (res) => {
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    await new Promise<void>((r) => server.close(() => r()));
+    assert.equal(body, 'pong');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 11 — registerRoute error handling
+// (was Suite 10 before the listen() suite was inserted above)
 // ---------------------------------------------------------------------------
 
 describe('registerRoute — invalid middleware', () => {
@@ -923,19 +994,16 @@ describe('registerRoute — invalid middleware', () => {
 
 // Variant of makeRequest that does NOT pass a done() callback, so the router's
 // own 404 / 500 handlers fire instead of the test harness fallback.
+// Uses router.listen(0) directly now that listen() returns the server instance.
 function makeRequestNoDone(
   router: ReturnType<typeof createRouter>,
   options: { method?: string; url?: string },
 ): Promise<FakeResponse> {
   return new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => {
-      try {
-        (router.listener as any)(req, res);
-      } catch (e) {
-        reject(e);
-      }
-    });
-    server.listen(0, '127.0.0.1', () => {
+    // router.listen() now returns the underlying server — no need to create
+    // one manually.  The 'listening' event fires once the OS has bound the port.
+    const server = router.listen(0);
+    server.on('listening', () => {
       const addr = server.address() as net.AddressInfo;
       const chunks: Buffer[] = [];
       const req = http.request(

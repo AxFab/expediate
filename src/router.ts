@@ -204,11 +204,32 @@ interface Router {
   /** Register middleware for `PATCH` requests. */
   patch(path: string | RegExp, ...args: MiddlewareArg[]): void;
   /**
-   * Start listening on the given port.
+   * Start listening on the given port and return the underlying server instance.
+   *
+   * The returned server can be used for graceful shutdown (`server.close()`),
+   * discovering the OS-assigned port when `port` is `0`
+   * (`(server.address() as AddressInfo).port`), or attaching extra event
+   * listeners.
+   *
    * When `opts` contains both `key` and `cert`, an HTTPS server is created;
    * otherwise a plain HTTP server is used.
+   *
+   * @returns The `http.Server` or `https.Server` instance.
+   *
+   * @example
+   * ```ts
+   * // Graceful shutdown
+   * const server = router.listen(3000, () => console.log('Listening'));
+   * process.on('SIGTERM', () => server.close());
+   *
+   * // Discover the OS-assigned ephemeral port
+   * const server = router.listen(0, () => {
+   *   const { port } = server.address() as AddressInfo;
+   *   console.log(`Listening on port ${port}`);
+   * });
+   * ```
    */
-  listen(port: number, opts?: TlsOptions | (() => void), cb?: () => void): void;
+  listen(port: number, opts?: TlsOptions | (() => void), cb?: () => void): http.Server | https.Server;
   /**
    * The underlying `(req, res, next)` function, allowing this router to be
    * mounted as middleware inside another router:
@@ -738,16 +759,21 @@ function createRouter(): Router {
       port: number,
       opts?: TlsOptions | (() => void),
       cb?: () => void,
-    ): void {
+    ): http.Server | https.Server {
       if (typeof opts === 'function') {
         cb = opts;
         opts = undefined;
       }
       const rawListener = listener as unknown as http.RequestListener;
-      if (opts && (opts as TlsOptions).key && (opts as TlsOptions).cert)
-        https.createServer(opts as TlsOptions, rawListener).listen(port, cb);
-      else
-        http.createServer(rawListener).listen(port, cb);
+      if (opts && (opts as TlsOptions).key && (opts as TlsOptions).cert) {
+        const server = https.createServer(opts as TlsOptions, rawListener);
+        server.listen(port, cb);
+        return server;
+      } else {
+        const server = http.createServer(rawListener);
+        server.listen(port, cb);
+        return server;
+      }
     },
   };
 

@@ -1,11 +1,22 @@
-# expediate
+<p align="center">
+  <img src="docs/expediate.png" alt="expediate" width="260" />
+</p>
 
-A lightweight, zero-dependency TypeScript HTTP routing framework for Node.js.
+<p align="center">
+  A lightweight, zero-dependency TypeScript HTTP routing framework for Node.js.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/expediate"><img src="https://img.shields.io/npm/v/expediate.svg" alt="npm version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node ≥ 18" />
+  <a href="https://npmcharts.com/compare/expediate?minimal=true"><img src="https://img.shields.io/npm/dm/expediate.svg" alt="npm downloads" /></a>
+</p>
+
+---
 
 **expediate** provides an Express-compatible API surface with full TypeScript types, built-in body parsing, static file serving, JWT authentication, multipart form handling, and a Git Smart HTTP gateway — all in a single package with no runtime dependencies beyond Node.js itself.
 
-  [![NPM Version][npm-image]][npm-url]
-  [![NPM Downloads][downloads-image]][downloads-url]
 
 ---
 
@@ -688,8 +699,3 @@ import type { GitHandlerOptions } from 'expediate';
 ## License
 
 MIT © 2021 Fabien Bavent
-
-[npm-image]: https://img.shields.io/npm/v/expediate.svg
-[npm-url]: https://npmjs.org/package/expediate
-[downloads-image]: https://img.shields.io/npm/dm/expediate.svg
-[downloads-url]: https://npmcharts.com/compare/expediate?minimal=true

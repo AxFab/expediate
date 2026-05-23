@@ -293,7 +293,7 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
  * @param opt
  * @returns
  */
-export function getCreate(gitDirectory:string, opt:GitCreateOption): Promise<void> {
+export function gitCreate(gitDirectory:string, opt:GitCreateOption): Promise<void> {
 
   return new Promise((resolve, reject) => {
 

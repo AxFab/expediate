@@ -26,7 +26,7 @@
 // ── Router ────────────────────────────────────────────────────────────────────
 import createRouter from './router';
 export { createRouter }
-export type { 
+export type {
   Router,
   RouterRequest,
   RouterResponse,
@@ -42,39 +42,38 @@ export type {
 // ── Static ────────────────────────────────────────────────────────────────────
 
 export { serveStatic, serveFile, sendFile, mime } from './static';
-export type { 
+export type {
   StaticOptions,
   Mime
 } from './static';
 
 // ── Miscallenous ──────────────────────────────────────────────────────────────
 
-export { json, formData, parseBody, logger } from './misc';
-export type { 
+export { json, formData, parseBody, logger, cors } from './misc';
+export type {
   BodyOptions,
   LoggerOptions,
-  FormPart,  
+  FormPart,
 } from './misc';
 
 // ── JWT Authentication ────────────────────────────────────────────────────────
 import createJwtPlugin from './jwt-auth'
 export { createJwtPlugin }
-export type { 
+export type {
   JwtPlugin,
   JwtConfig
 } from './jwt-auth';
 
 // ── Git repository ────────────────────────────────────────────────────────────
-import  gitHandler from './git'
-export { gitHandler }
-export type { 
+export { gitHandler, gitCreate } from './git'
+export type {
     GitHandlerOptions,
 } from './git'
 
 // ── API Service ───────────────────────────────────────────────────────────────
 import apiBuilder from './apis'
 export { apiBuilder }
-export type { 
+export type {
     ApiError,
     ServiceMethod,
     ServiceInstance,
@@ -82,4 +81,3 @@ export type {
     RouteMap,
     ServiceDefinition
 } from './apis'
-
