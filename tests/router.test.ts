@@ -10,36 +10,11 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
+import { describe, it } from 'node:test';
+
 import createRouter from '../src/router.ts';
 import type { Middleware, RouterRequest, RouterResponse } from '../src/router.js';
 
-// ---------------------------------------------------------------------------
-// Minimal test harness
-// ---------------------------------------------------------------------------
-
-type TestFn = () => void | Promise<void>;
-
-interface Suite {
-  name: string;
-  tests: { name: string; fn: TestFn }[];
-}
-
-const suites: Suite[] = [];
-let currentSuite: Suite | null = null;
-
-function describe(name: string, body: () => void) {
-  const suite: Suite = { name, tests: [] };
-  suites.push(suite);
-  const prev = currentSuite;
-  currentSuite = suite;
-  body();
-  currentSuite = prev;
-}
-
-function it(name: string, fn: TestFn) {
-  if (!currentSuite) throw new Error('it() called outside describe()');
-  currentSuite.tests.push({ name, fn });
-}
 
 // ---------------------------------------------------------------------------
 // HTTP test helpers
@@ -2023,48 +1998,181 @@ describe('res.json() sets Content-Type: application/json', () => {
   });
 });
 
+describe('req.ip — client IP resolution', () => {
+  it('defaults to socket remoteAddress when trustProxy is not set', async () => {
+    const router = createRouter();
+    let capturedIp = '';
+    router.get('/ip', (req, res) => { capturedIp = req.ip; res.end('ok'); });
+    await makeRequest(router, { url: '/ip' });
+    // Real HTTP server: remoteAddress is '127.0.0.1' or '::ffff:127.0.0.1'.
+    assert.ok(capturedIp !== '', 'req.ip should be non-empty');
+    assert.ok(
+      capturedIp.includes('127.0.0.1') || capturedIp === '::1',
+      `Expected loopback address, got: ${capturedIp}`,
+    );
+  });
+
+  it('defaults to socket remoteAddress when trustProxy is false', async () => {
+    const router = createRouter({ trustProxy: false });
+    let capturedIp = '';
+    router.get('/ip', (req, res) => { capturedIp = req.ip; res.end('ok'); });
+    await makeRequest(router, { url: '/ip' });
+    assert.ok(capturedIp !== '', 'req.ip should be non-empty');
+    assert.ok(
+      capturedIp.includes('127.0.0.1') || capturedIp === '::1',
+      `Expected loopback address, got: ${capturedIp}`,
+    );
+  });
+
+  it('ignores X-Forwarded-For when trustProxy is false', async () => {
+    const router = createRouter({ trustProxy: false });
+    let capturedIp = '';
+    router.get('/ip', (req, res) => { capturedIp = req.ip; res.end('ok'); });
+    await makeRequest(router, {
+      url: '/ip',
+      headers: { 'x-forwarded-for': '1.2.3.4' },
+    });
+    assert.ok(
+      capturedIp.includes('127.0.0.1') || capturedIp === '::1',
+      `Expected loopback (not 1.2.3.4), got: ${capturedIp}`,
+    );
+  });
+
+  it('uses first X-Forwarded-For entry when trustProxy is true', async () => {
+    const router = createRouter({ trustProxy: true });
+    let capturedIp = '';
+    router.get('/ip', (req, res) => { capturedIp = req.ip; res.end('ok'); });
+    await makeRequest(router, {
+      url: '/ip',
+      headers: { 'x-forwarded-for': '203.0.113.5, 10.0.0.1' },
+    });
+    assert.equal(capturedIp, '203.0.113.5');
+  });
+
+  it('falls back to socket address when X-Forwarded-For is absent and trustProxy is true', async () => {
+    const router = createRouter({ trustProxy: true });
+    let capturedIp = '';
+    router.get('/ip', (req, res) => { capturedIp = req.ip; res.end('ok'); });
+    await makeRequest(router, { url: '/ip' });
+    assert.ok(capturedIp !== '', 'req.ip should be non-empty');
+    assert.ok(
+      capturedIp.includes('127.0.0.1') || capturedIp === '::1',
+      `Expected loopback, got: ${capturedIp}`,
+    );
+  });
+
+  it('handles a single-value X-Forwarded-For header correctly', async () => {
+    const router = createRouter({ trustProxy: true });
+    let capturedIp = '';
+    router.get('/ip', (req, res) => { capturedIp = req.ip; res.end('ok'); });
+    await makeRequest(router, {
+      url: '/ip',
+      headers: { 'x-forwarded-for': '198.51.100.42' },
+    });
+    assert.equal(capturedIp, '198.51.100.42');
+  });
+});
+
 // ---------------------------------------------------------------------------
-// Runner
+// Suite 24 — res.type()
 // ---------------------------------------------------------------------------
 
-async function run() {
-  let passed = 0;
-  let failed = 0;
-  const failures: { suite: string; test: string; error: unknown }[] = [];
+describe('res.type() — set Content-Type header', () => {
+  it('sets the Content-Type header to the provided MIME type', async () => {
+    const router = createRouter();
+    router.get('/csv', (_req, res) => {
+      res.type('text/csv').send('a,b\n1,2');
+    });
+    const r = await makeRequest(router, { url: '/csv' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.headers['content-type'], 'text/csv');
+  });
 
-  for (const suite of suites) {
-    console.log(`\n  ${suite.name}`);
-    for (const test of suite.tests) {
-      try {
-        await test.fn();
-        console.log(`    ✅✓ ${test.name}`);
-        passed++;
-      } catch (e) {
-        console.log(`    ❌✗ ${test.name}`);
-        failed++;
-        failures.push({ suite: suite.name, test: test.name, error: e });
-      }
-    }
-  }
+  it('returns this for chaining with send()', async () => {
+    const router = createRouter();
+    router.get('/xml', (_req, res) => {
+      res.type('application/xml').send('<root/>');
+    });
+    const r = await makeRequest(router, { url: '/xml' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.headers['content-type'], 'application/xml');
+    assert.equal(r.body, '<root/>');
+  });
 
-  const total = passed + failed;
-  console.log(`\n  ${passed}/${total} passing${failed > 0 ? `, ${failed} failing` : ''}\n`);
+  it('can be used with res.status() and res.type() chaining', async () => {
+    const router = createRouter();
+    router.get('/data', (_req, res) => {
+      res.status(201).type('text/plain').send('created');
+    });
+    const r = await makeRequest(router, { url: '/data' });
+    assert.equal(r.statusCode, 201);
+    assert.equal(r.headers['content-type'], 'text/plain');
+    assert.equal(r.body, 'created');
+  });
 
-  if (failures.length > 0) {
-    console.log('Failures:\n');
-    for (const { suite, test, error } of failures) {
-      console.log(`  [${suite}] ${test}`);
-      if (error instanceof Error) {
-        console.log(`    ${error.message}`);
-        const lines = error.stack?.split('\n').slice(1, 4) ?? [];
-        for (const line of lines) console.log(`  ${line}`);
-      } else {
-        console.log(`    ${String(error)}`);
-      }
-      console.log('');
-    }
-    process.exit(1);
-  }
-}
+  it('overrides a previously set Content-Type', async () => {
+    const router = createRouter();
+    router.get('/override', (_req, res) => {
+      res.setHeader('Content-Type', 'text/plain');
+      res.type('application/octet-stream').send('bytes');
+    });
+    const r = await makeRequest(router, { url: '/override' });
+    assert.equal(r.headers['content-type'], 'application/octet-stream');
+  });
+});
 
-run().catch((e) => { console.error(e); process.exit(1); });
+// ---------------------------------------------------------------------------
+// Suite 25 — res.download()
+// ---------------------------------------------------------------------------
+
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+describe('res.download() — file download with Content-Disposition', () => {
+  // Create a temporary file shared across tests in this suite.
+  const tmpDir  = mkdtempSync(join(tmpdir(), 'expediate-test-'));
+  const tmpFile = join(tmpDir, 'hello.txt');
+  writeFileSync(tmpFile, 'hello download');
+
+  it('sets Content-Disposition: attachment with the basename as filename', async () => {
+    const router = createRouter();
+    router.get('/dl', (_req, res) => res.download(tmpFile));
+    const r = await makeRequest(router, { url: '/dl' });
+    assert.equal(r.statusCode, 200);
+    assert.ok(
+      r.headers['content-disposition']?.includes('attachment'),
+      `Expected attachment, got: ${r.headers['content-disposition']}`,
+    );
+    assert.ok(
+      r.headers['content-disposition']?.includes('hello.txt'),
+      `Expected filename="hello.txt", got: ${r.headers['content-disposition']}`,
+    );
+  });
+
+  it('streams the file body correctly', async () => {
+    const router = createRouter();
+    router.get('/dl', (_req, res) => res.download(tmpFile));
+    const r = await makeRequest(router, { url: '/dl' });
+    assert.equal(r.body, 'hello download');
+  });
+
+  it('uses a custom filename when provided', async () => {
+    const router = createRouter();
+    router.get('/dl', (_req, res) => res.download(tmpFile, 'custom-name.txt'));
+    const r = await makeRequest(router, { url: '/dl' });
+    assert.ok(
+      r.headers['content-disposition']?.includes('custom-name.txt'),
+      `Expected custom-name.txt, got: ${r.headers['content-disposition']}`,
+    );
+  });
+
+  it('responds 404 when the file does not exist', async () => {
+    const router = createRouter();
+    router.get('/missing', (_req, res) => res.download(join(tmpDir, 'no-such-file.txt')));
+    const r = await makeRequest(router, { url: '/missing' });
+    assert.equal(r.statusCode, 404);
+    // Clean up after last test in this suite.
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+});

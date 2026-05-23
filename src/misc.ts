@@ -952,9 +952,7 @@ export function logger(opts?: Partial<LoggerOptions>): Middleware {
     // even if later middleware mutates req.path (e.g. prefix stripping).
     const timestamp   = formatter.format(new Date());
     const requestPath = req.path ?? (req as any).url ?? '/';
-    const ip = (req.headers['x-forwarded-for'] as string | undefined)
-      ?? (req as any).socket?.remoteAddress
-      ?? '-';
+    const ip = req.ip ?? ''
     const user = options.user?.(req) ?? '-';
     const receivedAt = Date.now();
 

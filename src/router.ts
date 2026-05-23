@@ -21,11 +21,14 @@
 'use strict';
 
 import * as crypto from 'crypto';
+import * as fs     from 'fs';
 import * as http   from 'http';
 import * as https  from 'https';
 import * as http2  from 'http2';
 import * as net    from 'net';
+import * as path   from 'path';
 import { BodyOptions, FormPart, parseMultipartBody, extractCharset, readReqBody } from './misc';
+import { serveFile } from './static.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,6 +71,29 @@ interface RouterOptions {
    * ```
    */
   timeout?: number;
+
+  /**
+   * Trust the `X-Forwarded-For` header when resolving `req.ip`.
+   *
+   * When `true`, `req.ip` is set to the **first** (leftmost) value in the
+   * `X-Forwarded-For` header, which is the IP address reported by the
+   * outermost client.  This is the correct setting when the server sits behind
+   * a reverse proxy (e.g. nginx, AWS ALB) that injects this header.
+   *
+   * When `false` (default), `req.ip` contains the raw socket remote address
+   * and the `X-Forwarded-For` header is ignored.  Use this mode when the
+   * server is directly internet-facing to prevent IP spoofing.
+   *
+   * @default false
+   *
+   * @example
+   * ```ts
+   * // Behind a trusted reverse proxy
+   * const app = createRouter({ trustProxy: true });
+   * app.get('/me', (req, res) => res.send(req.ip));
+   * ```
+   */
+  trustProxy?: boolean;
 }
 
 /**
@@ -122,6 +148,19 @@ interface RouterRequest extends http.IncomingMessage {
   json(opts?: BodyOptions): Promise<unknown | null>;
 
   /**
+   * The IP address of the remote client.
+   *
+   * - When the router is created with `{ trustProxy: true }`, this is the
+   *   **first** value from the `X-Forwarded-For` header (the originating
+   *   client address as reported by the proxy chain).
+   * - Otherwise this is the raw TCP socket remote address
+   *   (`req.socket?.remoteAddress`), which cannot be spoofed by the client.
+   *
+   * Always an empty string when neither source is available.
+   */
+  ip: string;
+
+  /**
    * Read and decode the request body as plain text.
    *
    * Returns the body string (decoded using the charset in `Content-Type`,
@@ -168,6 +207,42 @@ interface RouterResponse extends http.ServerResponse {
    * Returns `this` to allow chaining.
    */
   cookie(name: string, value: string | object, options?: CookieOptions): this;
+
+  /**
+   * Trigger a file download in the client's browser.
+   *
+   * Sets the `Content-Disposition: attachment` header (which prompts a
+   * "Save As" dialog in browsers), then streams the file at `filepath` using
+   * {@link sendFile}.
+   *
+   * @param filepath - Absolute or relative filesystem path to the file to send.
+   * @param filename - Override the file name advertised to the browser.
+   *   Defaults to `path.basename(filepath)`.
+   *
+   * @example
+   * ```ts
+   * app.get('/invoice', (_req, res) =>
+   *   res.download('/var/reports/2024-Q1.pdf', 'invoice-2024-Q1.pdf'));
+   * ```
+   */
+  download(filepath: string, filename?: string): void;
+
+  /**
+   * Set the `Content-Type` response header and return `this` for chaining.
+   *
+   * The value is set verbatim — include the charset when needed
+   * (e.g. `'text/html; charset=utf-8'`).
+   *
+   * @param mime - The MIME type string to set.
+   * @returns `this` for chaining.
+   *
+   * @example
+   * ```ts
+   * res.type('text/csv').send(csvData);
+   * res.type('application/octet-stream').send(binaryData);
+   * ```
+   */
+  type(mime: string): this;
 }
 
 /** Options accepted by `res.cookie()`. */
@@ -787,14 +862,16 @@ function verifyCookieValue(signed: string, secret: string): string | false {
  * - `redirect(url)`           — issue a 302 redirect.
  * - `cookie(name, val, opts)` — append a `Set-Cookie` header.
  *
- * @param req    - The raw incoming message to augment.
- * @param res    - The raw server response to augment.
- * @param secret - Optional cookie-signing secret.
+ * @param req         - The raw incoming message to augment.
+ * @param res         - The raw server response to augment.
+ * @param secret      - Optional cookie-signing secret.
+ * @param trustProxy  - When `true`, resolve `req.ip` from `X-Forwarded-For`.
  */
 function updateHttpObjects(
-  req:    http.IncomingMessage,
-  res:    http.ServerResponse,
-  secret: string | undefined,
+  req:         http.IncomingMessage,
+  res:         http.ServerResponse,
+  secret:      string | undefined,
+  trustProxy?: boolean,
 ): void {
   const rReq = req as RouterRequest;
   const rRes = res as RouterResponse;
@@ -802,6 +879,18 @@ function updateHttpObjects(
   if (rReq.queries) return; // Already augmented.
 
   rReq.queries = {};
+
+  // Resolve the client IP address.
+  // When trustProxy is true the leftmost value in X-Forwarded-For is used
+  // (the originating client behind the proxy chain).  Otherwise we read the
+  // raw TCP remote address directly from the socket, which cannot be spoofed.
+  if (trustProxy) {
+    const xff = req.headers['x-forwarded-for'];
+    const first = Array.isArray(xff) ? xff[0] : xff;
+    rReq.ip = (first ? first.split(',')[0].trim() : req.socket?.remoteAddress) ?? '';
+  } else {
+    rReq.ip = req.socket?.remoteAddress ?? '';
+  }
 
   const qry = new URL(`http://${req.headers.host}${req.url}`);
   rReq.originalUrl = req.url!;
@@ -980,6 +1069,27 @@ function updateHttpObjects(
 
     return rRes;
   };
+
+  rRes.download = (filepath: string, filename?: string): void => {
+    const name = filename ?? path.basename(filepath);
+    // Use double-quotes and escape any double-quote in the filename per RFC 6266.
+    const safeName = name.replace(/"/g, '\\"');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    // Guard: return 404 when the file does not exist (serveFile would send 500
+    // for any stat error; we want the conventional 404 for downloads).
+    fs.access(filepath, fs.constants.F_OK, (err) => {
+      if (err) {
+        if (!rRes.writableEnded) rRes.status(404).end('Not Found');
+        return;
+      }
+      serveFile(filepath)(rReq, rRes, () => { /* no-op */ });
+    });
+  };
+
+  rRes.type = (mime: string): typeof rRes => {
+    res.setHeader('Content-Type', mime);
+    return rRes;
+  };
 }
 
 /**
@@ -1128,8 +1238,9 @@ function createRouter(
   const routerPrefix = typeof prefixOrOpts === 'string' ? prefixOrOpts : undefined;
   const options      = typeof prefixOrOpts === 'object' ? prefixOrOpts : (opts ?? {});
 
-  const secret    = options.secret;
-  const timeoutMs = options.timeout;
+  const secret      = options.secret;
+  const timeoutMs   = options.timeout;
+  const trustProxy  = options.trustProxy ?? false;
 
   const routes: Layer[] = [];
 
@@ -1166,7 +1277,7 @@ function createRouter(
     const url    = req.url;
     let idx = 0;
 
-    updateHttpObjects(req, res, secret);
+    updateHttpObjects(req, res, secret, trustProxy);
 
     // ── Optional per-request timeout ──────────────────────────────────────
     // Uses both a socket-level idle timeout (as the transport boundary) and a

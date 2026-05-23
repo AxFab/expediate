@@ -18,6 +18,7 @@ import { execSync, spawn as spawnChild } from 'node:child_process';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import zlib         from 'node:zlib';
+import { describe, it } from 'node:test';
 
 import createRouter       from '../src/router.ts';
 import { gitHandler, gitCreate } from '../src/git.ts';
@@ -30,30 +31,6 @@ import type { RouterRequest } from '../src/router.ts';
 
 const FIXTURES  = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const BARE_REPO = path.join(FIXTURES, 'git-repo.git');
-
-// ---------------------------------------------------------------------------
-// Minimal test harness
-// ---------------------------------------------------------------------------
-
-type TestFn = () => void | Promise<void>;
-interface Suite { name: string; tests: { name: string; fn: TestFn }[] }
-
-const suites: Suite[] = [];
-let currentSuite: Suite | null = null;
-
-function describe(name: string, body: () => void) {
-  const suite: Suite = { name, tests: [] };
-  suites.push(suite);
-  const prev = currentSuite;
-  currentSuite = suite;
-  body();
-  currentSuite = prev;
-}
-
-function it(name: string, fn: TestFn) {
-  if (!currentSuite) throw new Error('it() called outside describe()');
-  currentSuite.tests.push({ name, fn });
-}
 
 // ---------------------------------------------------------------------------
 // HTTP test helpers
@@ -739,44 +716,4 @@ describe('gitCreate()', () => {
 // Runner
 // ---------------------------------------------------------------------------
 
-async function run() {
-  let passed = 0;
-  let failed = 0;
-  const failures: { suite: string; test: string; error: unknown }[] = [];
-
-  for (const suite of suites) {
-    console.log(`\n  ${suite.name}`);
-    for (const test of suite.tests) {
-      try {
-        await test.fn();
-        console.log(`    ✓ ${test.name}`);
-        passed++;
-      } catch (e) {
-        console.log(`    ✗ ${test.name}`);
-        failed++;
-        failures.push({ suite: suite.name, test: test.name, error: e });
-      }
-    }
-  }
-
-  const total = passed + failed;
-  console.log(`\n  ${passed}/${total} passing${failed > 0 ? `, ${failed} failing` : ''}\n`);
-
-  if (failures.length > 0) {
-    console.log('Failures:\n');
-    for (const { suite, test, error } of failures) {
-      console.log(`  [${suite}] ${test}`);
-      if (error instanceof Error) {
-        console.log(`    ${error.message}`);
-        const lines = error.stack?.split('\n').slice(1, 4) ?? [];
-        for (const line of lines) console.log(`  ${line}`);
-      } else {
-        console.log(`    ${String(error)}`);
-      }
-      console.log('');
-    }
-    process.exit(1);
-  }
-}
-
-run().catch((e) => { console.error(e); process.exit(1); });
+// run()// .catch((e) => { console.error(e); process.exit(1); });

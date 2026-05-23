@@ -285,7 +285,7 @@ non-null arguments directly to the error handler registered via FEAT-04.
 
 ---
 
-#### FEAT-08 · `req.ip` and proxy trust
+#### ~~FEAT-08 · `req.ip` and proxy trust~~ ✅ Fixed
 
 The logger reads `X-Forwarded-For` directly, but no other part of the framework
 exposes the client IP in a consistent, configurable way. In a reverse-proxy
@@ -308,7 +308,7 @@ in the response `X-Request-ID` header.
 
 ---
 
-#### FEAT-10 · `res.download(filepath, filename?)` helper
+#### ~~FEAT-10 · `res.download(filepath, filename?)` helper~~ ✅ Fixed
 
 There is no convenient way to serve a file as an attachment (i.e. prompt the
 browser to download it). The workaround requires setting `Content-Disposition`
@@ -358,7 +358,7 @@ with `moduleResolution: bundler` and publish both under the `exports` field in
 
 ---
 
-#### FEAT-14 · `res.type(mimeType)` convenience helper
+#### ~~FEAT-14 · `res.type(mimeType)` convenience helper~~ ✅ Fixed
 
 Setting the response content type requires the verbose
 `res.setHeader('Content-Type', 'application/json')`. A shorthand would improve
@@ -553,40 +553,40 @@ single-host deployments.
 |~~FIX-05~~| Bug         | ✅       | Signed cookies non-functional                   |
 |~~FIX-06~~| Bug         | ✅       | Cookie reading ignores `j:`/`s:` prefixes       |
 | FIX-07   | Bug         | 🟠       | `async setup()` not awaited in apiBuilder       |
-| FIX-08   | Bug         | 🟠       | Refresh token store grows without bound         |
+| FIX-08   | Bug         | 🟠 JWT   | Refresh token store grows without bound         |
 |~~FIX-09~~| Bug         | ✅       | `req.json()` rejects with wrong error shape     |
 |~~FIX-10~~| Bug         | ✅       | `BodyOptions.strict` not enforced               |
 | FIX-11   | Bug         | 🟡       | Directory listing unsorted                      |
 |~~FIX-12~~| Bug         | ✅       | `listen()` exposes no server handle             |
-|~~FIX-13~~| Bug         | 🟡       | Incomplete JSDoc on `gitCreate`                 |
-| FIX-14   | Bug         | 🟡       | `refreshTokenSecret` is a no-op field           |
+|~~FIX-13~~| Bug         | ✅       | Incomplete JSDoc on `gitCreate`                 |
+| FIX-14   | Bug         | 🟡 JWT   | `refreshTokenSecret` is a no-op field           |
 |~~FEAT-01~~| Feature    | ✅       | `application/x-www-form-urlencoded` parser      |
-|~~FEAT-02~~| Feature    | 🔴       | Graceful shutdown                               |
+|~~FEAT-02~~| Feature    | ✅       | Graceful shutdown                               |
 |~~FEAT-03~~| Feature    | ✅       | Query-string array support                      |
-|~~FEAT-04~~| Feature    | 🔴       | Global error handler hook                       |
-| FEAT-05  | Feature     | 🔴       | Response compression middleware                 |
-|~~FEAT-06~~| Feature    | 🟠       | Router base path / prefix                       |
-|~~FEAT-07~~| Feature    | 🟠       | `next(err)` error propagation                   |
-| FEAT-08  | Feature     | 🟠       | `req.ip` and proxy trust setting                |
-| FEAT-09  | Feature     | 🟠       | Request ID middleware                           |
-| FEAT-10  | Feature     | 🟠       | `res.download()` helper                         |
+|~~FEAT-04~~| Feature    | ✅       | Global error handler hook                       |
+| FEAT-05  | Feature     | 🔴 MDW   | Response compression middleware                 |
+|~~FEAT-06~~| Feature    | ✅       | Router base path / prefix                       |
+|~~FEAT-07~~| Feature    | ✅       | `next(err)` error propagation                   |
+|~~FEAT-08~~| Feature    | ✅       | `req.ip` and proxy trust setting                |
+| FEAT-09  | Feature     | 🟠 MDW   | Request ID middleware                           |
+|~~FEAT-10~~| Feature    | ✅       | `res.download()` helper                         |
 |~~FEAT-11~~| Feature    | ✅       | Multipart streaming for large uploads           |
-|~~FEAT-12~~| Feature    | 🟠       | Route introspection (`router.routes()`)         |
+|~~FEAT-12~~| Feature    | ✅       | Route introspection (`router.routes()`)         |
 | FEAT-13  | Feature     | 🟡       | ESM / dual-package build                        |
-| FEAT-14  | Feature     | 🟡       | `res.type()` convenience helper                 |
+|~~FEAT-14~~| Feature    | ✅       | `res.type()` convenience helper                 |
 | FEAT-15  | Feature     | 🟡       | Path parameter type constraints                 |
-| FEAT-16  | Feature     | 🟡       | JWT asymmetric algorithm support                |
-| FEAT-17  | Feature     | 🟡       | Documented pluggable refresh token store        |
-|~~FEAT-18~~| Feature    | 🟡       | Built-in request timeout                        |
+| FEAT-16  | Feature     | 🟡 JWT   | JWT asymmetric algorithm support                |
+| FEAT-17  | Feature     | 🟡 JWT   | Documented pluggable refresh token store        |
+|~~FEAT-18~~| Feature    | ✅       | Built-in request timeout                        |
 | NTH-01   | Nice-to-have| —        | OpenAPI / Swagger spec generation               |
 | NTH-02   | Nice-to-have| —        | WebSocket upgrade support                       |
-|~~NTH-03~~| Nice-to-have| —        | HTTP/2 support                                  |
-| NTH-04   | Nice-to-have| —        | Rate limiting middleware                        |
-| NTH-05   | Nice-to-have| —        | Response caching middleware                     |
-| NTH-06   | Nice-to-have| —        | CSRF protection middleware                      |
-| NTH-07   | Nice-to-have| —        | Helmet-style security headers middleware        |
+|~~NTH-03~~| Nice-to-have| ✅       | HTTP/2 support                                  |
+| NTH-04   | Nice-to-have| —  MDW   | Rate limiting middleware                        |
+| NTH-05   | Nice-to-have| —  MDW   | Response caching middleware                     |
+| NTH-06   | Nice-to-have| —  MDW   | CSRF protection middleware                      |
+| NTH-07   | Nice-to-have| —  MDW   | Helmet-style security headers middleware        |
 | NTH-08   | Nice-to-have| —        | ETag / conditional-GET for dynamic responses    |
-|~~NTH-09~~| Nice-to-have| —        | Documented 404 override pattern                 |
+|~~NTH-09~~| Nice-to-have| ✅       | Documented 404 override pattern                 |
 | NTH-10   | Nice-to-have| —        | CLI scaffold (`npx expediate init`)             |
 | NTH-11   | Nice-to-have| —        | Request body schema validation hook             |
 | NTH-12   | Nice-to-have| —        | Cluster / multi-process helper                  |
