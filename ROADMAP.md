@@ -86,7 +86,7 @@ The cookie parser in `updateHttpObjects()` now decodes cookies on read:
 
 ---
 
-#### FIX-07 · `apiBuilder` `setup()` is not awaited when async
+#### ~~FIX-07 · `apiBuilder` `setup()` is not awaited when async~~ ✅ Fixed
 
 **File:** `src/apis.ts` — `buildModule()`
 
@@ -100,7 +100,7 @@ the interim, or document the `throwIfNotReady()` pattern prominently.
 
 ---
 
-#### FIX-08 · Refresh token store grows without bound
+#### ~~FIX-08 · Refresh token store grows without bound~~ ✅ Fixed
 
 **File:** `src/jwt-auth.ts` — `DEFAULT_CONFIG`
 
@@ -140,7 +140,7 @@ cover the strict-mode accept/reject matrix and the 400-on-invalid-JSON case
 
 ---
 
-#### FIX-11 · Directory listing is not sorted
+#### ~~FIX-11 · Directory listing is not sorted~~ ✅ Fixed
 
 **File:** `src/static.ts` — `writeIndexOf()`
 
@@ -172,7 +172,7 @@ making the generated `.d.ts` documentation unhelpful.
 
 ---
 
-#### FIX-14 · `refreshTokenSecret` is a no-op config field
+#### ~~FIX-14 · `refreshTokenSecret` is a no-op config field~~ ✅ Fixed
 
 **File:** `src/jwt-auth.ts` — `JwtConfig`
 
@@ -245,7 +245,7 @@ router.onError((err, req, res) => {
 
 ---
 
-#### FEAT-05 · Response compression middleware
+#### ~~FEAT-05 · Response compression middleware~~ ✅ Fixed
 
 There is no way to gzip/brotli-compress response bodies. All responses are sent
 uncompressed, which is a significant performance and bandwidth problem for text
@@ -297,7 +297,7 @@ socket address.
 
 ---
 
-#### FEAT-09 · Request ID middleware
+#### ~~FEAT-09 · Request ID middleware~~ ✅ Fixed
 
 Distributed tracing and log correlation require a unique request ID attached to
 every request. Today this must be implemented ad-hoc by every application.
@@ -346,7 +346,7 @@ for debugging, not for generating documentation, and not for OpenAPI generation.
 
 ### 🟡 Medium
 
-#### FEAT-13 · ESM / dual-package build
+#### ~~FEAT-13 · ESM / dual-package build~~ ✅ Fixed
 
 The package is CommonJS-only (`"type": "commonjs"`). Modern Node.js projects
 (and Bun, Deno) increasingly use ESM. A dual CJS+ESM build (or an ESM-first
@@ -381,7 +381,7 @@ coercion (e.g. `req.params.id` as a `number`).
 
 ---
 
-#### FEAT-16 · JWT algorithm expansion (RS256 / ES256)
+#### ~~FEAT-16 · JWT algorithm expansion (RS256 / ES256)~~ ✅ Fixed
 
 Only HMAC algorithms (`HS256`, `HS384`, `HS512`) are supported. Asymmetric
 algorithms (`RS256`, `ES256`) are needed for distributed systems where the
@@ -392,7 +392,7 @@ token is verified by a service that should not know the signing secret.
 
 ---
 
-#### FEAT-17 · Persistent / pluggable refresh token store
+#### ~~FEAT-17 · Persistent / pluggable refresh token store~~ ✅ Fixed
 
 The default token store is an in-memory `Map` — not suitable for multi-instance
 deployments (tokens issued on instance A are invisible to instance B). While
@@ -425,7 +425,7 @@ not strictly necessary for correctness or stability.
 
 ---
 
-#### NTH-01 · OpenAPI / Swagger spec generation
+#### ~~NTH-01 · OpenAPI / Swagger spec generation~~ ✅ Fixed
 
 `apiBuilder` already has enough structural information (HTTP methods, path
 patterns, service definitions) to generate an OpenAPI 3.x spec automatically.
@@ -456,7 +456,7 @@ with HTTP/2's request/response objects.
 
 ---
 
-#### NTH-04 · Rate limiting middleware
+#### ~~NTH-04 · Rate limiting middleware~~ ✅ Fixed
 
 No built-in protection against request floods. Applications must integrate a
 third-party library (which conflicts with the zero-dependency philosophy).
@@ -466,7 +466,7 @@ using an in-memory sliding window counter — no external dependency required.
 
 ---
 
-#### NTH-05 · Response caching middleware
+#### ~~NTH-05 · Response caching middleware~~ ✅ Fixed
 
 A `cacheControl(opts)` middleware that sets `Cache-Control`, `Expires`, and
 `Vary` headers on responses based on configurable rules would simplify CDN
@@ -474,7 +474,7 @@ integration.
 
 ---
 
-#### NTH-06 · CSRF protection middleware
+#### ~~NTH-06 · CSRF protection middleware~~ ✅ Fixed
 
 Session-based applications need CSRF token generation and validation. A
 lightweight `csrf()` middleware using the synchronizer-token pattern (or
@@ -482,7 +482,7 @@ double-submit cookie) would make expediate suitable for server-rendered apps.
 
 ---
 
-#### NTH-07 · Helmet-style security headers middleware
+#### ~~NTH-07 · Helmet-style security headers middleware~~ ✅ Fixed
 
 A `helmet()` middleware that sets a sensible default security-header baseline
 (`Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`,
@@ -552,39 +552,39 @@ single-host deployments.
 |~~FIX-04~~| Bug         | ✅       | Wrong method returns 404 instead of 405         |
 |~~FIX-05~~| Bug         | ✅       | Signed cookies non-functional                   |
 |~~FIX-06~~| Bug         | ✅       | Cookie reading ignores `j:`/`s:` prefixes       |
-| FIX-07   | Bug         | 🟠       | `async setup()` not awaited in apiBuilder       |
-| FIX-08   | Bug         | 🟠 JWT   | Refresh token store grows without bound         |
+|~~FIX-07~~| Bug         | ✅       | `async setup()` not awaited in apiBuilder       |
+|~~FIX-08~~| Bug         | ✅       | Refresh token store grows without bound         |
 |~~FIX-09~~| Bug         | ✅       | `req.json()` rejects with wrong error shape     |
 |~~FIX-10~~| Bug         | ✅       | `BodyOptions.strict` not enforced               |
-| FIX-11   | Bug         | 🟡       | Directory listing unsorted                      |
+|~~FIX-11~~| Bug         | ✅       | Directory listing unsorted                      |
 |~~FIX-12~~| Bug         | ✅       | `listen()` exposes no server handle             |
 |~~FIX-13~~| Bug         | ✅       | Incomplete JSDoc on `gitCreate`                 |
-| FIX-14   | Bug         | 🟡 JWT   | `refreshTokenSecret` is a no-op field           |
+|~~FIX-14~~| Bug         | ✅       | `refreshTokenSecret` is a no-op field           |
 |~~FEAT-01~~| Feature    | ✅       | `application/x-www-form-urlencoded` parser      |
 |~~FEAT-02~~| Feature    | ✅       | Graceful shutdown                               |
 |~~FEAT-03~~| Feature    | ✅       | Query-string array support                      |
 |~~FEAT-04~~| Feature    | ✅       | Global error handler hook                       |
-| FEAT-05  | Feature     | 🔴 MDW   | Response compression middleware                 |
+|~~FEAT-05~~| Feature    | ✅       | Response compression middleware                 |
 |~~FEAT-06~~| Feature    | ✅       | Router base path / prefix                       |
 |~~FEAT-07~~| Feature    | ✅       | `next(err)` error propagation                   |
 |~~FEAT-08~~| Feature    | ✅       | `req.ip` and proxy trust setting                |
-| FEAT-09  | Feature     | 🟠 MDW   | Request ID middleware                           |
+|~~FEAT-09~~| Feature    | ✅       | Request ID middleware                           |
 |~~FEAT-10~~| Feature    | ✅       | `res.download()` helper                         |
 |~~FEAT-11~~| Feature    | ✅       | Multipart streaming for large uploads           |
 |~~FEAT-12~~| Feature    | ✅       | Route introspection (`router.routes()`)         |
-| FEAT-13  | Feature     | 🟡       | ESM / dual-package build                        |
+|~~FEAT-13~~| Feature    | ✅       | ESM / dual-package build                        |
 |~~FEAT-14~~| Feature    | ✅       | `res.type()` convenience helper                 |
 | FEAT-15  | Feature     | 🟡       | Path parameter type constraints                 |
-| FEAT-16  | Feature     | 🟡 JWT   | JWT asymmetric algorithm support                |
-| FEAT-17  | Feature     | 🟡 JWT   | Documented pluggable refresh token store        |
+|~~FEAT-16~~| Feature    | ✅       | JWT asymmetric algorithm support                |
+|~~FEAT-17~~| Feature    | ✅       | Documented pluggable refresh token store        |
 |~~FEAT-18~~| Feature    | ✅       | Built-in request timeout                        |
-| NTH-01   | Nice-to-have| —        | OpenAPI / Swagger spec generation               |
+|~~NTH-01~~| Nice-to-have| ✅       | OpenAPI / Swagger spec generation               |
 | NTH-02   | Nice-to-have| —        | WebSocket upgrade support                       |
 |~~NTH-03~~| Nice-to-have| ✅       | HTTP/2 support                                  |
-| NTH-04   | Nice-to-have| —  MDW   | Rate limiting middleware                        |
-| NTH-05   | Nice-to-have| —  MDW   | Response caching middleware                     |
-| NTH-06   | Nice-to-have| —  MDW   | CSRF protection middleware                      |
-| NTH-07   | Nice-to-have| —  MDW   | Helmet-style security headers middleware        |
+|~~NTH-04~~| Nice-to-have| ✅       | Rate limiting middleware                        |
+|~~NTH-05~~| Nice-to-have| ✅       | Response caching middleware                     |
+|~~NTH-06~~| Nice-to-have| ✅       | CSRF protection middleware                      |
+|~~NTH-07~~| Nice-to-have| ✅       | Helmet-style security headers middleware        |
 | NTH-08   | Nice-to-have| —        | ETag / conditional-GET for dynamic responses    |
 |~~NTH-09~~| Nice-to-have| ✅       | Documented 404 override pattern                 |
 | NTH-10   | Nice-to-have| —        | CLI scaffold (`npx expediate init`)             |

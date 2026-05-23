@@ -475,14 +475,24 @@ type IndexCallback = (html: string | null, err: NodeJS.ErrnoException | null) =>
  * last-modification timestamps, and file sizes. An optional parent-directory
  * link is shown when `parentUrlPath` is provided.
  *
- * > **TODO** — Implement column sorting via `?C=N`, `?C=M`, `?C=S`, `?C=D`
- * > (name / modified / size / description) combined with `?O=A` / `?O=D`
- * > (ascending / descending). The current implementation always sorts by name
- * > ascending.
+ * **Default order:** directories before files; within each group, entries are
+ * sorted alphabetically by name (ascending).
+ *
+ * **Query-parameter sorting** (`?C=<col>;O=<ord>` — `;` or `&` separator):
+ * - `C=N` — sort by name (default)
+ * - `C=M` — sort by last-modification time
+ * - `C=S` — sort by size (directories always count as 0)
+ * - Any other value for `C` → falls back to name order
+ * - `O=A` — ascending (default)
+ * - `O=D` — descending
+ *
+ * Column header links are generated dynamically: clicking the **active** column
+ * toggles the order; clicking any **other** column resets to ascending.
  *
  * @param urlPath       - The URL path displayed in the page title and heading.
  * @param directoryPath - Absolute filesystem path of the directory to list.
  * @param parentUrlPath - URL of the parent directory, or `null` when at root.
+ * @param queryString   - Raw query string from the request URL (without `?`).
  * @param callback      - Called with `(html, null)` on success or
  *                        `(null, err)` on failure.
  */
@@ -490,20 +500,68 @@ function writeIndexOf(
   urlPath:       string,
   directoryPath: string,
   parentUrlPath: string | null,
+  queryString:   string,
   callback:      IndexCallback,
 ): void {
   fs.readdir(directoryPath, (err, files) => {
     if (err) return callback(null, err);
 
+    // ── Parse sort parameters ────────────────────────────────────────────────
+    // Support both ';' and '&' as separators (Apache style uses ';').
+    const params  = new URLSearchParams(queryString.replace(/;/g, '&'));
+    const rawCol  = params.get('C') ?? 'N';
+    const rawOrd  = params.get('O') ?? 'A';
+    const col     = ['N', 'M', 'S'].includes(rawCol) ? rawCol : 'N';
+    const ord     = rawOrd === 'D' ? 'D' : 'A';
+
+    // ── Collect entries with stats ───────────────────────────────────────────
+    interface Entry {
+      file:  string;
+      stat:  fs.Stats;
+      isDir: boolean;
+    }
+
+    const entries: Entry[] = [];
+    for (const file of files) {
+      const fullPath = nodePath.join(directoryPath, file);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        continue; // skip entries that disappeared between readdir and stat
+      }
+      entries.push({ file, stat, isDir: stat.isDirectory() });
+    }
+
+    // ── Sort ─────────────────────────────────────────────────────────────────
+    // Directories always come before files. Within each group apply col/ord.
+    const sign = ord === 'A' ? 1 : -1;
+    entries.sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      let cmp = 0;
+      if (col === 'N')      cmp = a.file.localeCompare(b.file);
+      else if (col === 'M') cmp = a.stat.mtime.getTime() - b.stat.mtime.getTime();
+      else if (col === 'S') cmp = (a.isDir ? 0 : a.stat.size) - (b.isDir ? 0 : b.stat.size);
+      return cmp * sign;
+    });
+
+    // ── Dynamic column header link ───────────────────────────────────────────
+    // Active column: toggles order. Inactive column: always links to ascending.
+    function thLink(c: string, label: string): string {
+      const nextOrd = (c === col && ord === 'A') ? 'D' : 'A';
+      return `<a href="?C=${c};O=${nextOrd}">${label}</a>`;
+    }
+
+    // ── Build HTML ───────────────────────────────────────────────────────────
     let html = '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">\n';
     html += '<html>\n';
     html += `<head><title>Index of ${urlPath}</title></head>\n`;
     html += `<body><h1>Index of ${urlPath}</h1><table>\n`;
     html += '<tr>'
       + '<th valign="top"><img src="/icons/blank.gif" alt="[ICO]"></th>'
-      + '<th><a href="?C=N;O=D">Name</a></th>'
-      + '<th><a href="?C=M;O=A">Last modified</a></th>'
-      + '<th><a href="?C=S;O=A">Size</a></th>'
+      + `<th>${thLink('N', 'Name')}</th>`
+      + `<th>${thLink('M', 'Last modified')}</th>`
+      + `<th>${thLink('S', 'Size')}</th>`
       + '<th><a href="?C=D;O=A">Description</a></th>'
       + '</tr>\n';
     html += '<tr><th colspan="5"><hr></th></tr>\n';
@@ -515,22 +573,15 @@ function writeIndexOf(
         + `<td>&nbsp;</td><td align="right">  - </td><td>&nbsp;</td>`
         + `</tr>\n`;
 
-    for (const file of files) {
-      const fullPath = nodePath.join(directoryPath, file);
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(fullPath);
-      } catch {
-        continue; // skip entries that disappeared between readdir and stat
-      }
-
-      const mimeType = mime.lookup(fullPath, '');
+    for (const { file, stat, isDir } of entries) {
+      const fullPath  = nodePath.join(directoryPath, file);
+      const mimeType  = mime.lookup(fullPath, '');
       const mediaType = mimeType.includes('/') ? mimeType.split('/')[0] : '';
-      const alt  = stat.isDirectory() ? 'folder' : (mediaType || 'unknown');
-      const icon = `/icons/${alt}.gif`;
-      const name = file + (stat.isDirectory() ? '/' : '');
-      const modified = stat.mtime.toUTCString();
-      const size     = stat.isDirectory() ? '-' : String(stat.size);
+      const alt       = isDir ? 'folder' : (mediaType || 'unknown');
+      const icon      = `/icons/${alt}.gif`;
+      const name      = file + (isDir ? '/' : '');
+      const modified  = stat.mtime.toUTCString();
+      const size      = isDir ? '-' : String(stat.size);
 
       html += `<tr>`
         + `<td valign="top"><img src="${icon}" alt="[${alt.toUpperCase()}]"></td>`
@@ -719,8 +770,9 @@ export function sendFile(
 
     if (stat.isDirectory()) {
       if (opts.indexOf) {
-        const parentUrl = req.path !== '/' ? nodePath.dirname(req.path) : null;
-        return writeIndexOf(req.path, pathname, parentUrl, (html, indexErr) => {
+        const parentUrl   = req.path !== '/' ? nodePath.dirname(req.path) : null;
+        const queryString = (req.url ?? '').split('?')[1] ?? '';
+        return writeIndexOf(req.path, pathname, parentUrl, queryString, (html, indexErr) => {
           if (indexErr)
             return HTTP.INTERNAL_ERROR(res, opts, indexErr.code ?? 'UNKNOWN');
           return res.status(200, opts.headers).send(html!);

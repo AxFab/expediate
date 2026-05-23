@@ -41,6 +41,7 @@ import type { StaticOptions } from '../src/static.ts';
 const FIXTURES = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const PUBLIC   = nodePath.join(FIXTURES, 'public');
 const SINGLE   = nodePath.join(FIXTURES, 'single.txt');
+const LISTING  = nodePath.join(FIXTURES, 'listing');
 
 // ---------------------------------------------------------------------------
 // HTTP test helpers
@@ -786,5 +787,221 @@ describe('Concurrent requests', () => {
     assert.ok(results[1].body.includes('"ok"'));
     assert.equal(results[2].statusCode, 200);
     assert.equal(results[3].statusCode, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 16 — directory listing: writeIndexOf sorting
+//
+// Fixture layout (tests/fixtures/listing/):
+//   alpha.txt   — 6 bytes,  mtime Jan 2023
+//   beta.txt    — 20 bytes, mtime Feb 2023
+//   gamma.txt   — 51 bytes, mtime Mar 2023
+//   subdir-a/   — directory
+//   subdir-b/   — directory
+// ---------------------------------------------------------------------------
+
+/**
+ * Issue a request for the LISTING directory using sendFile with indexOf:true.
+ * `urlPath` is the path+query string (e.g. '/?C=N;O=D').
+ */
+function requestListing(urlPath: string): Promise<FakeResponse> {
+  const opts = {
+    root: LISTING, redirect: false, indexOf: true,
+    fallthrough: false, dotfiles: 'deny',
+    headers: {}, immutable: false,
+  };
+
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((rawReq, rawRes) => {
+      const router = createRouter();
+      router.get('/', (req: any, res: any) => {
+        // Simulate the router augmentation providing req.url with query string.
+        req.url  = urlPath;
+        req.path = '/';
+        (sendFile as any)(req, res, LISTING, opts);
+      });
+      (router.listener as any)(rawReq, rawRes, () => {
+        rawRes.statusCode = 404;
+        rawRes.end('not found');
+      });
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const addr   = server.address() as net.AddressInfo;
+      const chunks: Buffer[] = [];
+
+      const req = http.request(
+        { host: '127.0.0.1', port: addr.port, method: 'GET', path: urlPath },
+        (res) => {
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            server.close();
+            resolve({
+              statusCode: res.statusCode ?? 0,
+              headers:    res.headers,
+              body:       Buffer.concat(chunks).toString(),
+            });
+          });
+        },
+      );
+      req.on('error', (e) => { server.close(); reject(e); });
+      req.end();
+    });
+  });
+}
+
+/** Extract entry names in document order from a listing HTML body. */
+function entryNames(html: string): string[] {
+  const matches = [...html.matchAll(/<a href="([^"]+)">\1<\/a>/g)];
+  return matches.map(m => m[1]);
+}
+
+describe('writeIndexOf — default sort (directories first, then files, alphabetical ascending)', () => {
+  it('responds with 200', async () => {
+    const res = await requestListing('/');
+    assert.equal(res.statusCode, 200);
+  });
+
+  it('lists directories before files', async () => {
+    const { body } = await requestListing('/');
+    const names = entryNames(body);
+    const firstFile = names.findIndex(n => !n.endsWith('/'));
+    const lastDir   = names.map((n, i) => n.endsWith('/') ? i : -1).filter(i => i >= 0).at(-1) ?? -1;
+    assert.ok(
+      firstFile === -1 || lastDir === -1 || lastDir < firstFile,
+      `directories must precede files — got: ${names.join(', ')}`,
+    );
+  });
+
+  it('lists subdirectories in alphabetical order', async () => {
+    const { body } = await requestListing('/');
+    const dirs = entryNames(body).filter(n => n.endsWith('/'));
+    assert.deepEqual(dirs, [...dirs].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it('lists files in alphabetical ascending order', async () => {
+    const { body } = await requestListing('/');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, [...files].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it('alpha.txt appears before beta.txt appears before gamma.txt', async () => {
+    const { body } = await requestListing('/');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['alpha.txt', 'beta.txt', 'gamma.txt']);
+  });
+});
+
+describe('writeIndexOf — sort by name (?C=N)', () => {
+  it('ascending (?C=N;O=A) lists files alpha → beta → gamma', async () => {
+    const { body } = await requestListing('/?C=N;O=A');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['alpha.txt', 'beta.txt', 'gamma.txt']);
+  });
+
+  it('descending (?C=N;O=D) lists files gamma → beta → alpha', async () => {
+    const { body } = await requestListing('/?C=N;O=D');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['gamma.txt', 'beta.txt', 'alpha.txt']);
+  });
+
+  it('descending still shows directories before files', async () => {
+    const { body } = await requestListing('/?C=N;O=D');
+    const names = entryNames(body);
+    const firstFile = names.findIndex(n => !n.endsWith('/'));
+    const lastDir   = names.map((n, i) => n.endsWith('/') ? i : -1).filter(i => i >= 0).at(-1) ?? -1;
+    assert.ok(lastDir < firstFile, 'directories must still precede files when descending');
+  });
+
+  it('supports & as separator: ?C=N&O=D', async () => {
+    const { body } = await requestListing('/?C=N&O=D');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['gamma.txt', 'beta.txt', 'alpha.txt']);
+  });
+});
+
+describe('writeIndexOf — sort by modification time (?C=M)', () => {
+  it('ascending (?C=M;O=A) lists files alpha (Jan) → beta (Feb) → gamma (Mar)', async () => {
+    const { body } = await requestListing('/?C=M;O=A');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['alpha.txt', 'beta.txt', 'gamma.txt']);
+  });
+
+  it('descending (?C=M;O=D) lists files gamma (Mar) → beta (Feb) → alpha (Jan)', async () => {
+    const { body } = await requestListing('/?C=M;O=D');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['gamma.txt', 'beta.txt', 'alpha.txt']);
+  });
+});
+
+describe('writeIndexOf — sort by size (?C=S)', () => {
+  it('ascending (?C=S;O=A) lists files alpha (6) → beta (20) → gamma (51)', async () => {
+    const { body } = await requestListing('/?C=S;O=A');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['alpha.txt', 'beta.txt', 'gamma.txt']);
+  });
+
+  it('descending (?C=S;O=D) lists files gamma (51) → beta (20) → alpha (6)', async () => {
+    const { body } = await requestListing('/?C=S;O=D');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['gamma.txt', 'beta.txt', 'alpha.txt']);
+  });
+});
+
+describe('writeIndexOf — invalid or absent parameters fall back to default', () => {
+  it('unknown C value (?C=X) falls back to name ascending', async () => {
+    const { body } = await requestListing('/?C=X;O=A');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['alpha.txt', 'beta.txt', 'gamma.txt']);
+  });
+
+  it('unknown O value (?O=Z) falls back to ascending', async () => {
+    const { body } = await requestListing('/?C=N;O=Z');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['alpha.txt', 'beta.txt', 'gamma.txt']);
+  });
+
+  it('empty query string uses default order', async () => {
+    const { body } = await requestListing('/');
+    const files = entryNames(body).filter(n => !n.endsWith('/'));
+    assert.deepEqual(files, ['alpha.txt', 'beta.txt', 'gamma.txt']);
+  });
+});
+
+describe('writeIndexOf — dynamic column header links', () => {
+  it('default (C=N, O=A): Name link toggles to descending (?C=N;O=D)', async () => {
+    const { body } = await requestListing('/');
+    assert.ok(body.includes('href="?C=N;O=D"'), 'Name header should link to descending when current is ascending');
+  });
+
+  it('default (C=N, O=A): Last modified link targets ascending (?C=M;O=A)', async () => {
+    const { body } = await requestListing('/');
+    assert.ok(body.includes('href="?C=M;O=A"'), 'Last modified header should link to ascending when not active');
+  });
+
+  it('default (C=N, O=A): Size link targets ascending (?C=S;O=A)', async () => {
+    const { body } = await requestListing('/');
+    assert.ok(body.includes('href="?C=S;O=A"'), 'Size header should link to ascending when not active');
+  });
+
+  it('when sorted by name descending: Name link toggles to ascending (?C=N;O=A)', async () => {
+    const { body } = await requestListing('/?C=N;O=D');
+    assert.ok(body.includes('href="?C=N;O=A"'), 'Name header should link to ascending when current is descending');
+  });
+
+  it('when sorted by size ascending: Size link toggles to descending (?C=S;O=D)', async () => {
+    const { body } = await requestListing('/?C=S;O=A');
+    assert.ok(body.includes('href="?C=S;O=D"'), 'Size header should toggle to descending when it is the active column');
+  });
+
+  it('when sorted by size ascending: Name link targets ascending (?C=N;O=A)', async () => {
+    const { body } = await requestListing('/?C=S;O=A');
+    assert.ok(body.includes('href="?C=N;O=A"'), 'Name header should link to ascending when not the active column');
+  });
+
+  it('when sorted by mtime descending: Last modified link toggles to ascending', async () => {
+    const { body } = await requestListing('/?C=M;O=D');
+    assert.ok(body.includes('href="?C=M;O=A"'), 'Last modified header should toggle to ascending when active+descending');
   });
 });
