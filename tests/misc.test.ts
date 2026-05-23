@@ -700,17 +700,34 @@ describe('logger() middleware', () => {
   });
 
   it('honours X-Forwarded-For header for client IP', async () => {
+    // Uses a direct http.createServer so the router's trustProxy option takes
+    // effect without interference from the request() helper's own createRouter
+    // wrapper (which would call updateHttpObjects first and make it idempotent).
     const lines: string[] = [];
     const mw = logger({ logger: (m) => lines.push(m) });
-    const router = createRouter();
+    const router = createRouter({ trustProxy: true });
     router.use('/', mw as any);
     router.get('/', (_req: any, res: any) => res.end('ok'));
 
-    await request(router.listener as any, {
-      method:  'GET',
-      path:    '/',
-      headers: { 'x-forwarded-for': '203.0.113.42' },
+    await new Promise<void>((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        (router.listener as any)(req, res, () => { res.statusCode = 404; res.end(); });
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as net.AddressInfo;
+        const req = http.request(
+          { host: '127.0.0.1', port: addr.port, method: 'GET', path: '/',
+            headers: { 'x-forwarded-for': '203.0.113.42' } },
+          (res) => {
+            res.resume();
+            res.on('end', () => { server.close(); resolve(); });
+          },
+        );
+        req.on('error', (e) => { server.close(); reject(e); });
+        req.end();
+      });
     });
+
     assert.ok(lines[0]?.includes('203.0.113.42'), `Expected IP in: ${lines[0]}`);
   });
 

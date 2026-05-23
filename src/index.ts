@@ -83,3 +83,14 @@ export type {
     RouteMap,
     ServiceDefinition
 } from './apis'
+
+// ── Middleware ────────────────────────────────────────────────────────────────
+export { compress, requestId, rateLimit, cacheControl, csrf, securityHeaders } from './middleware';
+export type {
+  CompressOptions,
+  RequestIdOptions,
+  RateLimitOptions,
+  CacheControlOptions,
+  CsrfOptions,
+  SecurityHeadersOptions,
+} from './middleware';
