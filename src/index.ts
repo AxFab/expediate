@@ -81,8 +81,24 @@ export type {
     ServiceInstance,
     ServiceMethods,
     RouteMap,
-    ServiceDefinition
+    ServiceDefinition,
+    ApiRouter,
+    ApiRouterExtensions,
 } from './apis'
+
+// ── OpenAPI spec generation ───────────────────────────────────────────────────
+export { describe, openApiSpec, serializeSpec, DESCRIBE_META } from './openapi'
+export type {
+    JsonSchema,
+    ParameterObject,
+    RequestBodyObject,
+    ResponseObject,
+    OperationMeta,
+    OpenApiServiceMeta,
+    SpecOptions,
+    SpecFormat,
+    OpenApiDocument,
+} from './openapi'
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 export { compress, requestId, rateLimit, cacheControl, csrf, securityHeaders } from './middleware';

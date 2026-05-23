@@ -710,51 +710,121 @@ describe('Multiple routes on the same service', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite 10 — Async setup() and throwIfNotReady pattern
+// Suite 10 — Async setup() and service readiness
 // ---------------------------------------------------------------------------
 
-describe('Async setup() and service readiness pattern', () => {
+describe('Async setup() and service readiness', () => {
   it('synchronous setup makes the service immediately ready', async () => {
     const service: ServiceDefinition<any> = {
       data:  () => ({ ready: false }),
       setup: function (this: any) { this.ready = true; },
-      methods: {
-        throwIfNotReady(this: any) {
-          if (!this.ready) throw { status: 503, message: 'Not ready' };
-        },
-      },
       GET: {
-        '/': function (this: any) {
-          this.throwIfNotReady();
-          return { ok: true };
-        },
+        '/': function (this: any) { return { ready: this.ready }; },
       },
     };
     const r = await request(service, { path: '/' });
     assert.equal(r.statusCode, 200);
+    assert.equal(r.json<any>().ready, true);
   });
 
-  it('async setup that has not yet resolved causes throwIfNotReady to fire', async () => {
+  it('async setup() returning a Promise is awaited — state is correct when routes run', async () => {
+    // setup() uses await Promise.resolve() (a microtask), which resolves before
+    // any I/O callback fires — so this.ready is true by the time the server
+    // is listening and the HTTP request arrives.
     const service: ServiceDefinition<any> = {
       data:  () => ({ ready: false }),
-      setup: function (this: any) {
-        // Never resolves during the test — simulates slow initialisation.
-        new Promise<void>(() => {}).then(() => { this.ready = true; });
-      },
-      methods: {
-        throwIfNotReady(this: any) {
-          if (!this.ready) throw { status: 503, message: 'Not ready yet' };
-        },
+      setup: async function (this: any) {
+        await Promise.resolve(); // microtask-level async
+        this.ready = true;
       },
       GET: {
-        '/': function (this: any) {
-          this.throwIfNotReady();
-          return { ok: true };
-        },
+        '/': function (this: any) { return { ready: this.ready }; },
       },
     };
     const r = await request(service, { path: '/' });
-    assert.equal(r.statusCode, 503);
-    assert.equal(r.body, 'Not ready yet');
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.json<any>().ready, true, 'async setup should be awaited before routes run');
+  });
+
+  it('singleton with pending async setup returns 503 from the guard', async () => {
+    // setup() returns a Promise that never resolves — the guard permanently
+    // blocks all requests with 503.
+    const service: ServiceDefinition<any> = {
+      data:  () => ({}),
+      setup: async function () {
+        await new Promise<void>(() => {}); // never resolves
+      },
+      GET: {
+        '/': function () { return { ok: true }; },
+      },
+    };
+    // Build the api and fire immediately — setup is still pending.
+    const api = apiBuilder(service);
+    const r = await requestRouter(api, { path: '/' });
+    assert.equal(r.statusCode, 503, 'guard should return 503 while setup is pending');
+  });
+
+  it('singleton guard clears once async setup resolves', async () => {
+    // Use a manually controlled promise so we can fire a request both before
+    // and after setup resolves.
+    let resolveSetup!: () => void;
+    const service: ServiceDefinition<any> = {
+      data:  () => ({ value: 42 }),
+      setup: async function () {
+        await new Promise<void>(resolve => { resolveSetup = resolve; });
+      },
+      GET: {
+        '/': function (this: any) { return { value: this.value }; },
+      },
+    };
+
+    const api = apiBuilder(service);
+
+    // Before setup resolves: guard fires 503.
+    const r1 = await requestRouter(api, { path: '/' });
+    assert.equal(r1.statusCode, 503, 'should be 503 before setup resolves');
+
+    // Release setup and wait for the microtask + promise chain to complete.
+    resolveSetup();
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+
+    // After setup resolves: routes work normally.
+    const r2 = await requestRouter(api, { path: '/' });
+    assert.equal(r2.statusCode, 200, 'should be 200 after setup resolves');
+    assert.equal(r2.json<any>().value, 42);
+  });
+
+  it('keyed instance async setup is awaited before the handler runs', async () => {
+    const service: ServiceDefinition<any> = {
+      scope: () => 'k1',
+      data:  () => ({ ready: false }),
+      setup: async function (this: any) {
+        await Promise.resolve();
+        this.ready = true;
+      },
+      GET: {
+        '/': function (this: any) { return { ready: this.ready }; },
+      },
+    };
+    const r = await request(service, { path: '/' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.json<any>().ready, true, 'keyed instance setup should be awaited');
+  });
+
+  it('ephemeral instance async setup is awaited before the handler runs', async () => {
+    const service: ServiceDefinition<any> = {
+      scope: () => null, // ephemeral
+      data:  () => ({ ready: false }),
+      setup: async function (this: any) {
+        await Promise.resolve();
+        this.ready = true;
+      },
+      GET: {
+        '/': function (this: any) { return { ready: this.ready }; },
+      },
+    };
+    const r = await request(service, { path: '/' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.json<any>().ready, true, 'ephemeral instance setup should be awaited');
   });
 });
