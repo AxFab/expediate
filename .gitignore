@@ -16,6 +16,7 @@ dist/
 !.git*
 !*.md
 !.npm*
+!LICENSE
 
 !tests/fixtures/**/*
 .DS_Store

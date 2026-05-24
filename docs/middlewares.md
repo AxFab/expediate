@@ -14,17 +14,15 @@
 - [stream-form-data](mdlw/stream-form-data)
 - [parse-body](mdlw/parse-body)
 
-## request/response utilities
+## Request/response utilities
 
 - [Logger](mdlw/logger)
 - [Compress](mdlw/compress)
-
 - [Cors](mdlw/cors)
 - [Security headers](mdlw/security-headers)
 - [Cache control](mdlw/cache-control)
 - [Csrf](mdlw/csrf)
 - [contitional get](mdlw/contitional-get)
-
 - [Request id](mdlw/request-id)
 - [Rate limit](mdlw/rate-limit)
 
