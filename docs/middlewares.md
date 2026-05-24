@@ -23,6 +23,7 @@
 - [Security headers](mdlw/security-headers)
 - [Cache control](mdlw/cache-control)
 - [Csrf](mdlw/csrf)
+- [contitional get](mdlw/contitional-get)
 
 - [Request id](mdlw/request-id)
 - [Rate limit](mdlw/rate-limit)

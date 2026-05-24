@@ -15,7 +15,7 @@
 
 ---
 
-**expediate** provides an Express-compatible API surface with full TypeScript types, built-in body parsing, static file serving, JWT authentication, multipart form handling, and a Git Smart HTTP gateway — all in a single package with no runtime dependencies beyond Node.js itself.
+**expediate** provides an Express-compatible API surface with full TypeScript types, built-in body parsing, static file serving, JWT authentication, multipart form handling, a Git Smart HTTP gateway, and a suite of production-ready middleware — all in a single package with no runtime dependencies beyond Node.js itself.
 
 
 ---
@@ -28,17 +28,29 @@
   - [Creating a router](#creating-a-router)
   - [Route registration](#route-registration)
   - [Path patterns](#path-patterns)
+  - [Request fields](#request-fields)
   - [Response helpers](#response-helpers)
+  - [Error handling](#error-handling)
   - [Sub-routers](#sub-routers)
   - [Starting the server](#starting-the-server)
 - [Body parsing](#body-parsing)
   - [`json()`](#json)
   - [`formData()`](#formdata)
+  - [`formEncoded()`](#formencoded)
   - [`parseBody()`](#parsebody)
+  - [`streamFormData()`](#streamformdata)
 - [Static files](#static-files)
   - [`serveStatic()`](#servestatic)
   - [`serveFile()`](#servefile)
   - [`sendFile()`](#sendfile)
+- [Middleware](#middleware)
+  - [`compress()`](#compress)
+  - [`conditionalGet()`](#conditionalget)
+  - [`cacheControl()`](#cachecontrol)
+  - [`requestId()`](#requestid)
+  - [`rateLimit()`](#ratelimit)
+  - [`csrf()`](#csrf)
+  - [`securityHeaders()`](#securityheaders)
 - [Request logging](#request-logging)
 - [JWT Authentication](#jwt-authentication)
   - [Setup](#setup)
@@ -48,8 +60,9 @@
 - [API service builder](#api-service-builder)
   - [Defining a service](#defining-a-service)
   - [Scoping](#scoping)
-  - [Error handling](#error-handling)
+  - [Service error handling](#service-error-handling)
 - [Git Smart HTTP gateway](#git-smart-http-gateway)
+- [OpenAPI spec generation](#openapi-spec-generation)
 - [TypeScript types](#typescript-types)
 
 ---
@@ -140,6 +153,16 @@ app.get('/users/:id',              handler);  // req.params.id
 app.get('/orgs/:org/repos/:repo',  handler);  // req.params.org, req.params.repo
 ```
 
+Parameters accept an optional **inline regex constraint** in parentheses. Only paths where the segment matches the constraint are routed to the handler — other values fall through to the next matching route:
+
+```ts
+app.get('/items/:id(\\d+)',        handler);  // digits only — /items/42 ✓  /items/abc ✗
+app.get('/files/:name([\\w-]+)',   handler);  // word chars and hyphens
+app.get('/v:ver(\\d+)/status',    handler);  // literal suffix after constraint
+```
+
+The constraint replaces the default `[^/]+` body; params are always strings — no coercion is performed. Named capture groups inside constraints are not allowed (they conflict with the outer `(?<name>…)` wrapper).
+
 **Glob patterns** (`.gitignore` wildcard rules)
 ```ts
 app.get('/api/*',       handler);  // one path segment
@@ -155,6 +178,29 @@ app.get(/^\/users\/(?<id>\d+)/, handler);  // req.params.id
 
 > **Route specificity:** when using `apiBuilder`, routes are automatically sorted by specificity (more segments / fewer parameters first) to prevent shorter paths from shadowing longer ones.
 
+### Request fields
+
+Every request object is augmented with additional fields before any middleware runs:
+
+| Field | Type | Description |
+|---|---|---|
+| `req.originalUrl` | `string` | Raw URL string, never modified |
+| `req.path` | `string` | Pathname portion of the URL; rewritten by `use()` prefix layers |
+| `req.params` | `Record<string, string>` | Merged map of URL query params and named route params |
+| `req.queries.url` | `Record<string, string \| string[]>` | URL query parameters (repeated keys collect into arrays) |
+| `req.queries.route` | `Record<string, string>` | Named route parameters captured from the path pattern |
+| `req.cookies` | `Record<string, unknown>` | Parsed `Cookie` header values |
+| `req.ip` | `string` | Remote client IP. When `trustProxy: true`, taken from `X-Forwarded-For` |
+| `req.json(opts?)` | `Promise<unknown>` | Read and parse the request body as JSON |
+| `req.text(opts?)` | `Promise<string>` | Read and decode the request body as plain text |
+| `req.formData(opts?)` | `Promise<FormPart[]>` | Read and parse a `multipart/form-data` body |
+
+Enable proxy IP trust when running behind nginx / a load balancer:
+
+```ts
+const app = createRouter({ trustProxy: true });
+```
+
 ### Response helpers
 
 Every response object is augmented with convenience methods:
@@ -165,10 +211,44 @@ res.send();                          // end with no body
 res.status(404).send('Not found');   // set status + body (chainable)
 res.status(201).end();               // set status and end
 res.redirect('/new-url');            // 302 redirect
+res.json({ ok: true });              // JSON body + Content-Type header
+res.type('text/csv').send(data);     // set Content-Type (chainable)
+res.etag('v1').json(payload);        // weak ETag W/"v1" (chainable)
+res.etag(sha256hex, true).send(buf); // strong ETag "sha256hex"
+res.download('/path/to/file.pdf');   // Content-Disposition: attachment
+res.download('/path/to/file.pdf', 'invoice.pdf'); // custom download name
 res.cookie('session', 'abc', {
   maxAge:   3_600_000,               // milliseconds
   path:     '/api',
-  signed:   false,
+  httpOnly: true,
+  secure:   true,
+  sameSite: 'Strict',
+});
+```
+
+### Error handling
+
+Register a global error handler to catch sync throws, async rejections, and `next(err)` calls:
+
+```ts
+app.onError((err, _req, res) => {
+  const status = (err as any)?.status ?? 500;
+  res.status(status).json({ error: String(err) });
+});
+```
+
+Register a custom 404 handler for unmatched routes:
+
+```ts
+app.setNotFound((_req, res) => res.status(404).json({ error: 'Not Found' }));
+```
+
+Pass an error to `next()` from within a middleware to skip to the error handler:
+
+```ts
+app.use('/protected', (req, _res, next) => {
+  if (!req.headers.authorization) return next(new Error('Unauthorized'));
+  next();
 });
 ```
 
@@ -197,9 +277,11 @@ app.use('/auth', authRouter.listener);  // equivalent
 
 ### Starting the server
 
+`router.listen()` returns the underlying `http.Server` (or `https.Server`) instance:
+
 ```ts
 // HTTP
-app.listen(3000, () => console.log('Ready'));
+const server = app.listen(3000, () => console.log('Ready'));
 
 // HTTPS
 import { readFileSync } from 'fs';
@@ -207,6 +289,25 @@ app.listen(443, {
   key:  readFileSync('server.key'),
   cert: readFileSync('server.crt'),
 });
+
+// HTTP/2
+app.listen(443, { key, cert, http2: true });
+
+// Graceful shutdown
+process.on('SIGTERM', () => app.shutdown(10_000));
+
+// Discover OS-assigned ephemeral port (useful in tests)
+const srv = app.listen(0, () => {
+  const { port } = srv.address() as AddressInfo;
+  console.log(`Listening on port ${port}`);
+});
+```
+
+Inspect all registered routes at runtime:
+
+```ts
+console.log(app.routes());
+// [{ method: 'GET', path: '/users', stripPath: false }, ...]
 ```
 
 ---
@@ -263,6 +364,19 @@ app.post('/upload', formData(), (req, res) => {
 
 Accepts the same `limit` and `inflate` options as `json()`.
 
+### `formEncoded()`
+
+Parses `application/x-www-form-urlencoded` bodies. Repeated keys (e.g. `tags=a&tags=b`) produce array values.
+
+```ts
+import { formEncoded } from 'expediate';
+
+app.post('/form', formEncoded(), (req, res) => {
+  const { username, tags } = (req as any).body;
+  res.json({ username, tags }); // tags may be string | string[]
+});
+```
+
 ### `parseBody()`
 
 Auto-detects the `Content-Type` and dispatches to the appropriate parser. Supports:
@@ -271,6 +385,7 @@ Auto-detects the `Content-Type` and dispatches to the appropriate parser. Suppor
 |---|---|
 | `application/json` | Parsed JS value |
 | `multipart/form-data` | `FormPart[]` |
+| `application/x-www-form-urlencoded` | `Record<string, string \| string[]>` |
 | `text/plain` | Decoded string |
 
 ```ts
@@ -280,6 +395,25 @@ app.use('/', parseBody());
 ```
 
 Unsupported MIME types receive `415 Unsupported Media Type`.
+
+### `streamFormData()`
+
+Async generator that yields each part of a `multipart/form-data` body as a stream, without waiting for the entire body to buffer first.
+
+```ts
+import { streamFormData } from 'expediate';
+
+app.post('/upload', async (req, res) => {
+  for await (const part of streamFormData(req)) {
+    const name = part.headers['content-disposition'];
+    const chunks: Buffer[] = [];
+    for await (const chunk of part.stream) chunks.push(chunk);
+    const content = Buffer.concat(chunks);
+    // process content...
+  }
+  res.send('ok');
+});
+```
 
 ---
 
@@ -337,6 +471,164 @@ app.get('/downloads/:file', (req, res) => {
   sendFile(req as any, res as any, filePath, opts as any);
 });
 ```
+
+---
+
+## Middleware
+
+A suite of production-ready middleware is included. All middleware factories return standard `Middleware` functions and can be mounted globally or on individual routes.
+
+### `compress()`
+
+Transparent response compression (Brotli, gzip, deflate). Must be mounted **before** any middleware that writes response bodies.
+
+```ts
+import { compress } from 'expediate';
+
+app.use(compress());                // default: Brotli > gzip > deflate, threshold 1 KB
+app.use(compress({ threshold: 512, brotliQuality: 6 }));
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `threshold` | `number` | `1024` | Minimum body size in bytes before compression is applied |
+| `br` | `boolean` | `true` | Enable Brotli when the client supports it |
+| `brotliQuality` | `number` | `4` | Brotli quality level (0–11) |
+| `gzipLevel` | `number` | default | gzip / deflate compression level (1–9) |
+| `filter` | `(req, res) => boolean` | — | Custom function to skip compression for specific responses |
+
+### `conditionalGet()`
+
+Handles `If-None-Match` and `If-Modified-Since` request headers (RFC 7232). When the response ETag or `Last-Modified` header indicates the client's cache is still fresh, a **304 Not Modified** is sent instead of the full response body.
+
+```ts
+import { conditionalGet } from 'expediate';
+
+app.get('/api/user/:id', conditionalGet(), (req, res) => {
+  const user = getUser(req.params.id);
+  res.etag(user.updatedAt.toISOString()); // set before sending
+  res.json(user);                          // → 304 when client is up to date
+});
+```
+
+`res.etag(value, strong?)` is a response helper available on every response:
+
+```ts
+res.etag('v1');              // weak ETag:   W/"v1"
+res.etag(sha256hex, true);   // strong ETag: "sha256hex"
+```
+
+Freshness is checked in RFC 7232 priority order: `If-None-Match` first (weak comparison, `*` wildcard supported), then `If-Modified-Since`. Only GET and HEAD are eligible for 304 — other methods pass through unchanged.
+
+### `cacheControl()`
+
+Sets `Cache-Control`, `Expires`, and `Vary` response headers.
+
+```ts
+import { cacheControl } from 'expediate';
+
+app.use('/api', cacheControl({ noStore: true }));
+app.use('/static', cacheControl({ maxAge: 31_536_000, immutable: true }));
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `maxAge` | `number` | `max-age=<seconds>`. Also sets `Expires`. |
+| `sMaxAge` | `number` | `s-maxage=<seconds>` for shared/CDN caches. |
+| `public` / `private` | `boolean` | Cache scope directive. |
+| `noStore` | `boolean` | Disables caching entirely. |
+| `noCache` | `boolean` | Requires revalidation before serving cached response. |
+| `mustRevalidate` | `boolean` | Stale responses must be revalidated. |
+| `immutable` | `boolean` | Response body will never change within its `max-age`. |
+| `vary` | `string \| string[]` | Sets the `Vary` header. |
+
+### `requestId()`
+
+Attaches a unique `req.id` to every request and echoes it in the response header.
+
+```ts
+import { requestId } from 'expediate';
+
+app.use(requestId());
+app.get('/health', (req, res) => res.json({ id: req.id, status: 'ok' }));
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `header` | `string` | `'x-request-id'` | Header name to read and write. |
+| `allowFromHeader` | `boolean` | `true` | Reuse client-supplied ID (set `false` in security-sensitive contexts). |
+| `generator` | `() => string` | `crypto.randomUUID` | Custom ID generator. |
+
+### `rateLimit()`
+
+In-memory sliding-window rate limiting.
+
+```ts
+import { rateLimit } from 'expediate';
+
+// 100 requests per minute per IP
+app.use(rateLimit({ windowMs: 60_000, max: 100 }));
+
+// Tighter limit on login
+app.post('/auth/login', rateLimit({ windowMs: 60_000, max: 5 }), loginHandler);
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `windowMs` | `number` | **required** | Sliding window duration in milliseconds. |
+| `max` | `number` | **required** | Maximum requests per client key within the window. |
+| `keyBy` | `(req) => string` | `req.ip` | Key extraction function. |
+| `message` | `string` | `'Too Many Requests'` | Body of the 429 response. |
+| `statusCode` | `number` | `429` | HTTP status on limit exceeded. |
+| `headers` | `boolean` | `true` | Set `X-RateLimit-*` headers on every response. |
+
+> **Note:** state is in-memory and is lost on process restart. Not suitable for multi-process deployments without a shared store.
+
+### `csrf()`
+
+CSRF protection using the double-submit cookie pattern.
+
+```ts
+import { csrf } from 'expediate';
+
+app.use(csrf());
+app.get('/form', (req, res) =>
+  res.send(`<input type="hidden" name="_csrf" value="${req.csrfToken!()}">`));
+// POST /form is validated automatically
+```
+
+Safe methods (GET, HEAD, OPTIONS, TRACE) are exempted. State-mutating requests must include the token in `X-CSRF-Token` header or `_csrf` body field.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `cookieName` | `string` | `'_csrf'` | Cookie that stores the token. |
+| `headerName` | `string` | `'x-csrf-token'` | Request header carrying the token. |
+| `fieldName` | `string` | `'_csrf'` | Parsed body field (fallback when header absent). |
+| `secure` | `boolean` | `false` | Mark the CSRF cookie as `Secure`. |
+| `sameSite` | `'Strict' \| 'Lax' \| 'None'` | `'Strict'` | `SameSite` attribute of the CSRF cookie. |
+
+### `securityHeaders()`
+
+Sets a hardened baseline of HTTP security headers.
+
+```ts
+import { securityHeaders } from 'expediate';
+
+app.use(securityHeaders());
+// Disable HSTS on plain HTTP:
+app.use(securityHeaders({ hsts: false }));
+```
+
+| Header set by default | Default value |
+|---|---|
+| `Strict-Transport-Security` | `max-age=15552000; includeSubDomains` |
+| `X-Frame-Options` | `SAMEORIGIN` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `geolocation=(), microphone=(), camera=()` |
+| `X-XSS-Protection` | `0` |
+
+Every header can be individually disabled (pass `false`) or overridden with a custom string.
 
 ---
 
@@ -480,14 +772,19 @@ const auth = createJwtPlugin({
   issuer:      'my-app',
   checkIssuer: true,                   // reject tokens with wrong iss claim
   alg:         'HS256',                // 'HS256' | 'HS384' | 'HS512'
+                                       // 'RS256' | 'RS384' | 'RS512'
+                                       // 'ES256' | 'ES384' | 'ES512'
+
+  // For RS*/ES* algorithms supply PEM keys instead of a shared secret
+  // accessTokenPrivateKey: readFileSync('private.pem', 'utf8'),
+  // accessTokenPublicKey:  readFileSync('public.pem',  'utf8'),
 
   // User lookup (replace with a database query) — must override
-  // Returned object must have a username field
   fetchUser: async (username) => {
     return await db.users.findOne({ username });
   },
 
-  // Password validation — default look for SHA256(user.passwordHash), replace with bcrypt/argon2
+  // Password validation — default uses SHA-256; replace with bcrypt/argon2
   isPasswordValid: async (user, password) => {
     return await bcrypt.compare(password, user.passwordHash);
   },
@@ -502,6 +799,13 @@ const auth = createJwtPlugin({
   // Custom token store (replace with Redis for multi-instance deployments)
   refreshTokenStore: redisAdapter,
 });
+```
+
+A built-in in-memory token store factory is available for testing:
+
+```ts
+import { createMapTokenStore } from 'expediate';
+const auth = createJwtPlugin({ refreshTokenStore: createMapTokenStore() });
 ```
 
 > **Security note:** the default password hashing uses SHA-256, which is fast and unsuitable for production. Replace `isPasswordValid` with a bcrypt or argon2 implementation.
@@ -596,7 +900,7 @@ const service: ServiceDefinition = {
 
 > The key returned by the `scope()` method is store at `this.$key`.
 
-### Error handling
+### Service error handling
 
 Throw structured errors from any handler or method to send precise HTTP responses:
 
@@ -667,28 +971,77 @@ Gzip-compressed `POST` bodies are decompressed transparently. Spawn errors (e.g.
 
 ---
 
+## OpenAPI spec generation
+
+Annotate service definitions and generate an OpenAPI 3.1 document automatically.
+
+```ts
+import { describe, openApiSpec, serializeSpec } from 'expediate';
+
+const todoService = describe({
+  summary:     'Todo list API',
+  description: 'Manage todos',
+  GET: {
+    '/todos': {
+      summary: 'List all todos',
+      responses: { 200: { description: 'Todo array' } },
+      handler: function (this: TodoState) { return Object.values(this.items); },
+    },
+  },
+  POST: {
+    '/todos': {
+      summary:     'Create a todo',
+      requestBody: { required: true },
+      responses:   { 200: { description: 'Created todo' } },
+      handler: function (this: TodoState, _params, body: any) {
+        const id = String(this.nextId++);
+        this.items[id] = { title: body.title, done: false };
+        return { id, ...this.items[id] };
+      },
+    },
+  },
+});
+
+const app = createRouter();
+app.use('/api', apiBuilder(todoService));
+app.get('/openapi.json', openApiSpec(todoService, { title: 'Todo API', version: '1.0.0' }));
+app.get('/openapi.yaml', openApiSpec(todoService, { title: 'Todo API', version: '1.0.0', format: 'yaml' }));
+```
+
+---
+
 ## TypeScript types
 
 Full type declarations are included. Key types exported from the package:
 
 ```ts
 // Router
-import type { Router, RouterRequest, RouterResponse, Middleware, MiddlewareArg } from 'expediate';
+import type {
+  Router, RouterOptions, RouterRequest, RouterResponse,
+  Middleware, MiddlewareArg, NextFunction, ErrorHandler,
+  Layer, RouteInfo, CookieOptions, TlsOptions, StringMap,
+} from 'expediate';
 
 // Body parsing
-import type { BodyOptions, FormPart } from 'expediate';
+import type { BodyOptions, FormPart, FormPartStream, LoggerOptions } from 'expediate';
 
 // Static files
-import type { StaticOptions } from 'expediate';
+import type { StaticOptions, Mime } from 'expediate';
 
-// Logging
-import type { LoggerOptions } from 'expediate';
+// Middleware
+import type {
+  CompressOptions, RequestIdOptions, RateLimitOptions,
+  CacheControlOptions, CsrfOptions, SecurityHeadersOptions,
+} from 'expediate';
 
 // JWT
-import type { JwtConfig, JwtPlugin, TokenPayload, UserRecord, TokenStore } from 'expediate';
+import type { JwtConfig, JwtPlugin, TokenPayload, UserRecord, TokenStore, RefreshTokenRecord } from 'expediate';
 
 // API builder
-import type { ServiceDefinition, ServiceMethod, ApiError } from 'expediate';
+import type { ServiceDefinition, ServiceMethod, ServiceMethods, RouteMap, ApiError } from 'expediate';
+
+// OpenAPI
+import type { OperationMeta, OpenApiServiceMeta, SpecOptions, OpenApiDocument } from 'expediate';
 
 // Git
 import type { GitHandlerOptions } from 'expediate';

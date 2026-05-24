@@ -104,7 +104,7 @@ export type {
 } from './openapi.js';
 
 // ── Middleware ────────────────────────────────────────────────────────────────
-export { compress, requestId, rateLimit, cacheControl, csrf, securityHeaders } from './middleware.js';
+export { compress, requestId, rateLimit, cacheControl, csrf, securityHeaders, conditionalGet } from './middleware.js';
 export type {
   CompressOptions,
   RequestIdOptions,

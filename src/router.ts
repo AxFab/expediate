@@ -243,6 +243,32 @@ interface RouterResponse extends http.ServerResponse {
    * ```
    */
   type(mime: string): this;
+
+  /**
+   * Set the `ETag` response header.
+   *
+   * By default a **weak** ETag is produced (`W/"value"`), which indicates that
+   * the two representations are semantically equivalent but not byte-for-byte
+   * identical.  Pass `true` as the second argument for a **strong** ETag
+   * (`"value"`), which implies byte-level equivalence and is required when
+   * byte-range requests must be validated.
+   *
+   * Returns `this` so calls can be chained before `res.send()` or `res.json()`.
+   *
+   * @param value  - The opaque ETag value (without quotes or `W/` prefix).
+   * @param strong - When `true`, produce a strong ETag.  Defaults to `false`.
+   * @returns `this` for chaining.
+   *
+   * @example
+   * ```ts
+   * // Weak ETag (default) — most appropriate for dynamic responses
+   * res.etag(user.updatedAt.toISOString()).json(user);
+   *
+   * // Strong ETag — use when the response body is content-addressed
+   * res.etag(sha256hex, true).send(fileContent);
+   * ```
+   */
+  etag(value: string, strong?: boolean): this;
 }
 
 /** Options accepted by `res.cookie()`. */
@@ -1193,6 +1219,11 @@ function updateHttpObjects(
 
   rRes.type = (mime: string): typeof rRes => {
     res.setHeader('Content-Type', mime);
+    return rRes;
+  };
+
+  rRes.etag = (value: string, strong = false): typeof rRes => {
+    res.setHeader('ETag', strong ? `"${value}"` : `W/"${value}"`);
     return rRes;
   };
 }

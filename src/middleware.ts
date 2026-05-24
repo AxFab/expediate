@@ -851,6 +851,168 @@ export interface SecurityHeadersOptions {
  * }));
  * ```
  */
+// ===========================================================================
+// 7 · conditionalGet — RFC 7232 conditional GET / 304 Not Modified
+// ===========================================================================
+
+/**
+ * Determine whether a cached response is still fresh according to RFC 7232.
+ *
+ * Evaluation priority:
+ * 1. **`If-None-Match`** — compared against the `ETag` header using weak
+ *    comparison (the `W/` prefix is stripped from both sides before matching).
+ *    The wildcard `*` matches any ETag.
+ * 2. **`If-Modified-Since`** — only consulted when `If-None-Match` is absent.
+ *    The response is fresh when `Last-Modified ≤ If-Modified-Since`.
+ *
+ * Returns `false` when neither condition applies so the full response is sent.
+ *
+ * @param etag         - The current value of the `ETag` response header.
+ * @param lastModified - The current value of the `Last-Modified` response header.
+ * @param ifNoneMatch  - The `If-None-Match` request header value (or array).
+ * @param ifModSince   - The `If-Modified-Since` request header value (or array).
+ */
+function isFreshResponse(
+  etag:         string | undefined,
+  lastModified: string | undefined,
+  ifNoneMatch:  string | string[] | undefined,
+  ifModSince:   string | string[] | undefined,
+): boolean {
+  const inm = Array.isArray(ifNoneMatch) ? ifNoneMatch[0] : ifNoneMatch;
+
+  if (inm) {
+    if (!etag) return false;
+    // `*` is a wildcard that matches any entity-tag.
+    if (inm.trim() === '*') return true;
+    // Weak comparison: strip the W/ prefix before comparing quoted tag values.
+    const normalize = (tag: string) => tag.startsWith('W/') ? tag.slice(2) : tag;
+    const tags = inm.split(',').map((t) => normalize(t.trim()));
+    return tags.includes(normalize(etag));
+  }
+
+  const ims = Array.isArray(ifModSince) ? ifModSince[0] : ifModSince;
+  if (ims && lastModified) {
+    const imsMs = new Date(ims).getTime();
+    const lmMs  = new Date(lastModified).getTime();
+    if (!isNaN(imsMs) && !isNaN(lmMs)) return lmMs <= imsMs;
+  }
+
+  return false;
+}
+
+/**
+ * Conditional GET middleware (RFC 7232).
+ *
+ * Transparently handles `If-None-Match` and `If-Modified-Since` request
+ * headers.  When the response carries an `ETag` or `Last-Modified` header and
+ * the client's cached copy is still fresh, the middleware short-circuits with
+ * **304 Not Modified** — stripping the response body and content-related
+ * headers — instead of sending the full response.
+ *
+ * Mount this middleware **before** the route handler. The route handler runs
+ * normally and can call `res.etag()` / `res.json()` / `res.send()` as usual;
+ * the middleware intercepts the outgoing writes and decides whether to replace
+ * the response with a 304.
+ *
+ * ```ts
+ * app.get('/api/user/:id', conditionalGet(), (req, res) => {
+ *   const user = getUser(req.params.id);
+ *   res.etag(user.updatedAt.toISOString());
+ *   res.json(user); // → 304 if ETag matches If-None-Match
+ * });
+ * ```
+ *
+ * **RFC 7232 compliance:**
+ * - `If-None-Match` is evaluated first (takes priority over `If-Modified-Since`).
+ * - Weak comparison is used for ETag matching (the `W/` prefix is ignored).
+ * - 304 responses strip `Content-Type`, `Content-Length`, and
+ *   `Content-Encoding`, but retain `ETag`, `Cache-Control`, `Vary`, and
+ *   `Last-Modified`.
+ * - Only GET and HEAD are eligible for 304 responses; other methods are
+ *   passed through unchanged.
+ *
+ * @returns An Express-compatible middleware function.
+ *
+ * @example
+ * ```ts
+ * // With ETag
+ * app.get('/resource', conditionalGet(), (req, res) => {
+ *   res.etag('v1.0').json({ value: 42 });
+ * });
+ *
+ * // With Last-Modified
+ * app.get('/file', conditionalGet(), (req, res) => {
+ *   res.setHeader('Last-Modified', new Date().toUTCString());
+ *   res.send(fileContent);
+ * });
+ * ```
+ */
+export function conditionalGet(): Middleware {
+  return (req: RouterRequest, res: RouterResponse, next: NextFunction): void => {
+    // Only GET and HEAD can yield a 304 Not Modified.
+    const method = req.method ?? 'GET';
+    if (method !== 'GET' && method !== 'HEAD') return next();
+
+    const rawRes = res as unknown as http.ServerResponse;
+    const origWrite = rawRes.write.bind(rawRes) as typeof rawRes.write;
+    const origEnd   = rawRes.end.bind(rawRes)   as typeof rawRes.end;
+
+    // Buffer all outgoing body data until we can check freshness at end().
+    const pending: Buffer[] = [];
+
+    (res as any).write = (
+      chunk: string | Buffer,
+      encOrCb?: BufferEncoding | ((err?: Error | null) => void),
+      _cb?: (err?: Error | null) => void,
+    ): boolean => {
+      const enc = typeof encOrCb === 'string' ? encOrCb : 'utf8';
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string, enc);
+      pending.push(buf);
+      return true;
+    };
+
+    (res as any).end = (
+      chunk?: string | Buffer | (() => void),
+      encOrCb?: BufferEncoding | (() => void),
+      _cb?: () => void,
+    ): http.ServerResponse => {
+      if (typeof chunk   === 'function') chunk   = undefined;
+      if (typeof encOrCb === 'function') encOrCb = undefined;
+
+      // Buffer any final chunk passed directly to end().
+      if (chunk != null) {
+        const enc = typeof encOrCb === 'string' ? encOrCb : 'utf8';
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string, enc);
+        pending.push(buf);
+      }
+
+      // Read the freshness-relevant headers set by the route handler.
+      const etag        = rawRes.getHeader('etag')          as string | undefined;
+      const lastMod     = rawRes.getHeader('last-modified') as string | undefined;
+      const ifNoneMatch = req.headers['if-none-match'];
+      const ifModSince  = req.headers['if-modified-since'];
+
+      if (isFreshResponse(etag, lastMod, ifNoneMatch, ifModSince)) {
+        // RFC 7232 §4.1: 304 response MUST NOT include a message body.
+        // Strip content-related headers; retain ETag, Cache-Control, Vary, Last-Modified.
+        rawRes.removeHeader('content-type');
+        rawRes.removeHeader('content-length');
+        rawRes.removeHeader('content-encoding');
+        rawRes.statusCode = 304;
+        origEnd();
+      } else {
+        // Not fresh — flush buffered body and end normally.
+        for (const buf of pending) origWrite(buf);
+        origEnd();
+      }
+
+      return rawRes;
+    };
+
+    next();
+  };
+}
+
 export function securityHeaders(opts?: SecurityHeadersOptions): Middleware {
   // Pre-compute all header values once at middleware-creation time.
   const headers: [string, string][] = [];

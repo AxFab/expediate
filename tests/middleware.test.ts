@@ -22,6 +22,7 @@ import {
   cacheControl,
   csrf,
   securityHeaders,
+  conditionalGet,
 } from '../src/middleware.ts';
 
 // ---------------------------------------------------------------------------
@@ -737,5 +738,238 @@ describe('securityHeaders() — security response headers', () => {
     const hsts = r.headers['strict-transport-security'] as string;
     assert.ok(hsts.includes('max-age=31536000'), `HSTS: ${hsts}`);
     assert.ok(hsts.includes('preload'),           `HSTS: ${hsts}`);
+  });
+});
+
+// ===========================================================================
+// conditionalGet() — RFC 7232 conditional GET / 304 Not Modified
+// ===========================================================================
+
+describe('conditionalGet() — conditional GET middleware', () => {
+  it('returns 200 with body when no If-None-Match header is sent', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('v1');
+      res.end('hello');
+    });
+
+    const r = await request(router, { path: '/' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'hello');
+  });
+
+  it('returns 304 with empty body when ETag matches If-None-Match (weak)', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('v1');
+      res.end('hello');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-none-match': 'W/"v1"' },
+    });
+    assert.equal(r.statusCode, 304);
+    assert.equal(r.body, '');
+  });
+
+  it('returns 304 when strong ETag matches using weak comparison', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('v1', true); // strong ETag: "v1"
+      res.end('hello');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-none-match': '"v1"' },
+    });
+    assert.equal(r.statusCode, 304);
+    assert.equal(r.body, '');
+  });
+
+  it('returns 200 when ETag does not match If-None-Match', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('v2');
+      res.end('updated');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-none-match': 'W/"v1"' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'updated');
+  });
+
+  it('returns 304 when If-None-Match is * (wildcard)', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('anything');
+      res.end('body');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-none-match': '*' },
+    });
+    assert.equal(r.statusCode, 304);
+    assert.equal(r.body, '');
+  });
+
+  it('304 response strips Content-Type, Content-Length, Content-Encoding', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('v1');
+      res.json({ value: 42 });
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-none-match': 'W/"v1"' },
+    });
+    assert.equal(r.statusCode, 304);
+    assert.ok(!r.headers['content-type'],     'content-type must be absent');
+    assert.ok(!r.headers['content-length'],   'content-length must be absent');
+    assert.ok(!r.headers['content-encoding'], 'content-encoding must be absent');
+  });
+
+  it('304 response retains the ETag header', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('v1');
+      res.end('body');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-none-match': 'W/"v1"' },
+    });
+    assert.equal(r.statusCode, 304);
+    assert.equal(r.headers['etag'], 'W/"v1"');
+  });
+
+  it('falls back to If-Modified-Since when If-None-Match is absent', async () => {
+    const past = new Date(Date.now() - 10_000).toUTCString(); // 10 s ago
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      res.setHeader('Last-Modified', past);
+      res.end('body');
+    });
+
+    // Client's If-Modified-Since is the same as Last-Modified → fresh
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-modified-since': past },
+    });
+    assert.equal(r.statusCode, 304);
+    assert.equal(r.body, '');
+  });
+
+  it('returns 200 when resource is newer than If-Modified-Since', async () => {
+    const now  = new Date().toUTCString();
+    const past = new Date(Date.now() - 60_000).toUTCString(); // 1 min ago
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      res.setHeader('Last-Modified', now);
+      res.end('fresh');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-modified-since': past },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'fresh');
+  });
+
+  it('If-None-Match takes priority over If-Modified-Since', async () => {
+    const past = new Date(Date.now() - 10_000).toUTCString();
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      // ETag mismatch — If-Modified-Since alone would say fresh,
+      // but If-None-Match says stale.
+      (res as any).etag('v2');
+      res.setHeader('Last-Modified', past);
+      res.end('body');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: {
+        'if-none-match':     'W/"v1"', // mismatch → not fresh
+        'if-modified-since': past,     // would match on its own
+      },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'body');
+  });
+
+  it('passes through non-GET methods without buffering', async () => {
+    const router = createRouter();
+    router.post('/', conditionalGet(), (_req, res) => {
+      (res as any).etag('v1');
+      res.end('created');
+    });
+
+    const r = await request(router, {
+      method:  'POST',
+      path:    '/',
+      headers: { 'if-none-match': 'W/"v1"' },
+    });
+    // POST is not eligible for 304
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'created');
+  });
+
+  it('returns 200 when no ETag is set even if If-None-Match is sent', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      // Handler does NOT call res.etag()
+      res.end('no etag here');
+    });
+
+    const r = await request(router, {
+      path:    '/',
+      headers: { 'if-none-match': '*' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'no etag here');
+  });
+
+  it('res.etag() returns res for chaining', async () => {
+    const router = createRouter();
+    router.get('/', conditionalGet(), (_req, res) => {
+      // Chain etag → json
+      (res as any).etag('abc').json({ ok: true });
+    });
+
+    const r = await request(router, { path: '/' });
+    assert.equal(r.statusCode, 200);
+    assert.ok(r.headers['etag']);
+    assert.equal(JSON.parse(r.body).ok, true);
+  });
+
+  it('res.etag() with strong=true sets a strong ETag header', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => {
+      (res as any).etag('sha256abc', true);
+      res.end('ok');
+    });
+
+    const r = await request(router, { path: '/' });
+    assert.equal(r.headers['etag'], '"sha256abc"');
+  });
+
+  it('res.etag() without strong flag sets a weak ETag header', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => {
+      (res as any).etag('sha256abc');
+      res.end('ok');
+    });
+
+    const r = await request(router, { path: '/' });
+    assert.equal(r.headers['etag'], 'W/"sha256abc"');
   });
 });

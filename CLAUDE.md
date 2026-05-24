@@ -31,17 +31,18 @@ Test files in `tests/` use `tsx` at runtime and are never compiled.
 
 | Source file       | Exports (from `src/index.ts`)                                              |
 |-------------------|----------------------------------------------------------------------------|
-| `router.ts`       | `createRouter`, types: `Router`, `RouterRequest`, `RouterResponse`, `Middleware`, `MiddlewareArg`, `NextFunction`, `Layer`, `CookieOptions`, `TlsOptions`, `StringMap` |
+| `router.ts`       | `createRouter`, types: `Router`, `RouterOptions`, `RouterRequest`, `RouterResponse`, `Middleware`, `MiddlewareArg`, `NextFunction`, `ErrorHandler`, `Layer`, `RouteInfo`, `CookieOptions`, `TlsOptions`, `StringMap` |
 | `static.ts`       | `serveStatic`, `serveFile`, `sendFile`, `mime`, types: `StaticOptions`, `Mime` |
-| `misc.ts`         | `json`, `formData`, `parseBody`, `logger`, `cors`, types: `BodyOptions`, `LoggerOptions`, `FormPart` |
-| `jwt-auth.ts`     | `createJwtPlugin`, types: `JwtPlugin`, `JwtConfig`                         |
+| `misc.ts`         | `json`, `formData`, `formEncoded`, `parseBody`, `streamFormData`, `logger`, `cors`, `parseMultipartBody`, types: `BodyOptions`, `LoggerOptions`, `FormPart`, `FormPartStream` |
+| `middleware.ts`   | `compress`, `requestId`, `rateLimit`, `cacheControl`, `csrf`, `securityHeaders`, `conditionalGet`, types: `CompressOptions`, `RequestIdOptions`, `RateLimitOptions`, `CacheControlOptions`, `CsrfOptions`, `SecurityHeadersOptions` |
+| `jwt-auth.ts`     | `createJwtPlugin`, `createMapTokenStore`, types: `JwtPlugin`, `JwtConfig`, `TokenStore`, `RefreshTokenRecord` |
 | `git.ts`          | `gitHandler`, `gitCreate`, types: `GitHandlerOptions`                      |
-| `apis.ts`         | `apiBuilder`, types: `ApiError`, `ServiceMethod`, `ServiceInstance`, `ServiceMethods`, `RouteMap`, `ServiceDefinition` |
+| `apis.ts`         | `apiBuilder`, types: `ApiError`, `ServiceMethod`, `ServiceInstance`, `ServiceMethods`, `RouteMap`, `ServiceDefinition`, `ApiRouter`, `ApiRouterExtensions` |
+| `openapi.ts`      | `describe`, `openApiSpec`, `serializeSpec`, `DESCRIBE_META`, types: `JsonSchema`, `ParameterObject`, `RequestBodyObject`, `ResponseObject`, `OperationMeta`, `OpenApiServiceMeta`, `SpecOptions`, `SpecFormat`, `OpenApiDocument` |
 
-Note: `cors` is exported from `misc` but **not documented in the README**. Same
-for `gitCreate`. `extractCharset` and `readReqBody` are exported from `misc.ts`
-directly but not re-exported through `index.ts` — they are implementation
-details also used by `router.ts`.
+Note: `cors` is exported from `misc` but **not documented in the README**. `extractCharset`
+and `readReqBody` are exported from `misc.ts` directly but not re-exported through `index.ts` —
+they are implementation details also used by `router.ts`.
 
 ---
 
@@ -59,9 +60,11 @@ Three strategies, chosen automatically by `compilePattern()`:
 
 2. **Plain string** — no wildcards → `compilePlainPath()`
    - Segments starting with `:` become named capture groups `(?<name>[^/]+)`
+   - **Inline regex constraints** — `:name(pattern)` replaces the default `[^/]+` body with the given pattern: `:id(\d+)` → `(?<id>\d+)`. A literal suffix after the closing `)` is regex-escaped and appended (e.g. `:id(\d+)px` → `(?<id>\d+)px`). Named capture groups inside constraints are rejected at registration time (they conflict with the outer wrapper).
    - Literal segments are regex-escaped
    - Pattern ends with `(?=/|$)` to avoid partial segment matches (so `/users` does NOT match `/users-admin`)
    - Anchored at `^`
+   - `isGlobPattern()` walks character-by-character and explicitly skips over `:name(constraint)` balanced-paren blocks so regex metacharacters (`?`, `*`) inside constraints are never mistaken for glob wildcards
 
 3. **RegExp** — used as-is; named capture groups become `req.params`
 
@@ -103,8 +106,11 @@ Fields added to `req`:
 - `path` — pathname portion of the URL; modified by `use()` layers
 - `params` — merged map (URL query params first, then named route params on match)
 - `queries` — structured object `{ url?: StringMap, route?: StringMap }`
-- `cookies` — parsed from `Cookie` header (naive `; `-split, `=`-split)
+- `cookies` — parsed from `Cookie` header (signed cookies verified with HMAC-SHA256 when `secret` is set)
+- `ip` — remote client IP; respects `X-Forwarded-For` when `trustProxy: true`
 - `json(opts)` — Promise-based JSON body reader (uses `readReqBody` from misc.ts)
+- `text(opts)` — Promise-based plain-text body reader
+- `formData(opts)` — Promise-based multipart/form-data body reader
 
 Fields added to `res`:
 - `send(data?)` — writes data and calls `res.end()`
@@ -112,33 +118,42 @@ Fields added to `res`:
 - `status(code, headers?)` — sets status code and optional headers, **returns `this`** for chaining
 - `redirect(url)` — 302 with `location` header
 - `cookie(name, val, opts)` — appends `Set-Cookie` header, **returns `this`** for chaining
+- `download(filepath, filename?)` — sets `Content-Disposition: attachment` then streams the file
+- `type(mime)` — sets `Content-Type` header, **returns `this`** for chaining
+- `etag(value, strong?)` — sets `ETag` header (`W/"value"` weak by default, `"value"` when `strong=true`), **returns `this`** for chaining
 
 The `X-Powered-By: Expediate` header is set on every response in `updateHttpObjects`.
 
-### Cookie helpers — known limitations
+### Cookie helpers
 
-- Cookie **reading**: the parser is naive (splits on `;` then `=`). It does not
-  yet decode `s:` (signed) or `j:` (JSON-encoded) cookie prefixes — there is a
-  `TODO` comment in the code.
-- Cookie **writing**: objects get `j:` prefix. `opts.signed = true` prepends
-  `s:` but the actual signing is not implemented (the code checks for a
-  `req.secret` field that is never set by the framework).
+- Cookie **reading**: `j:` prefixed values are JSON-parsed. `s:` prefixed values are HMAC-SHA256 verified against the router secret when `secret` is configured in `createRouter()`; cookies that fail verification are silently dropped.
+- Cookie **writing**: objects get `j:` prefix. `opts.signed = true` triggers HMAC-SHA256 signing (requires `secret` on the router).
 
 ### Error handling in `listener`
 
-Uncaught synchronous exceptions in middleware are caught with a try/catch and
-produce `500 Error METHOD URL`. There is **no async error catching** — if a
-middleware returns a rejected Promise without handling it, Node.js will produce
-an unhandled rejection.
+The `invoke()` helper catches both synchronous throws and async rejections:
+
+```ts
+const invoke = (mw: Middleware, nextFn: NextFunction): void => {
+  try {
+    const ret = mw(req, res, nextFn) as unknown;
+    if (ret instanceof Promise) ret.catch(invokeErrorHandler);
+  } catch (e) {
+    invokeErrorHandler(e);
+  }
+};
+```
+
+A custom error handler registered with `router.onError(handler)` receives the error. Without one, a 500 response is sent. The `next(err)` calling convention skips remaining routes and invokes the error handler directly.
 
 ### `router.listen()` signature
 
 ```ts
-listen(port: number, opts?: TlsOptions | (() => void), cb?: () => void): void
+listen(port: number, opts?: TlsOptions | (() => void), cb?: () => void):
+  http.Server | https.Server | http2.Http2SecureServer
 ```
 
-When `opts` is a function it is treated as the callback. HTTPS is used when
-`opts.key` and `opts.cert` are both present.
+When `opts` is a function it is treated as the callback. HTTPS is used when `opts.key` and `opts.cert` are present. HTTP/2 is used when `opts.http2 = true`. **Returns the underlying server instance** — use it for port discovery (`server.address()`), graceful shutdown, or attaching extra event listeners.
 
 ---
 
@@ -269,8 +284,13 @@ This is not a generated file; it is committed to the repo.
 
 ### Directory listing
 
-`writeIndexOf()` generates an Apache-style HTML directory listing with file
-names, sizes, and modification dates. There is a TODO about sorting entries.
+`writeIndexOf()` generates an Apache-style HTML directory listing with sortable columns. Sorting is controlled by query parameters:
+
+- `C` — column: `N` (name, default), `M` (mtime), `S` (size)
+- `O` — order: `A` (ascending, default), `D` (descending)
+- Both `;` and `&` separators are accepted (e.g. `?C=S;O=D` or `?C=S&O=D`)
+
+Directories always sort before files regardless of column or direction. Column header links toggle the sort direction when clicked (active column) or default to ascending (inactive column). Invalid `C`/`O` values silently fall back to name/ascending.
 
 ---
 
@@ -295,9 +315,10 @@ app.put('/data',  ...auth.requirePermission('write'), handler);
 
 Fully manual — no external library:
 - Base64URL encode/decode via `Buffer.from(...).toString('base64')` + char replacements
-- Signatures via Node.js `crypto.createHmac()` with `sha256`/`sha384`/`sha512`
-- Verification uses `crypto.timingSafeEqual()` to prevent timing attacks
-- Supported algorithms: `HS256` | `HS384` | `HS512` only (no RS*, ES*, PS*)
+- **HMAC** (`HS256`, `HS384`, `HS512`) — `crypto.createHmac()`, verification with `crypto.timingSafeEqual()`
+- **RSA** (`RS256`, `RS384`, `RS512`) — `crypto.createSign/createVerify()` with PEM keys
+- **ECDSA** (`ES256`, `ES384`, `ES512`) — `crypto.createSign/createVerify()` with PEM keys; DER-encoded signatures are converted to/from IEEE P1363 format (raw R||S) for standard JWT wire format
+- For RS*/ES* algorithms, `accessTokenPrivateKey` and `accessTokenPublicKey` are used instead of `accessTokenSecret`
 
 ### Token types
 
@@ -498,7 +519,56 @@ git in the test environment).
 
 ---
 
-## 9. Test Harness and Patterns
+## 9. Middleware (`src/middleware.ts`)
+
+Seven middleware factories, all exported from `src/index.ts`. Each uses the standard `(req, res, next)` signature and imports types from `router.ts` only (no circular dependencies).
+
+### Module augmentation
+
+`middleware.ts` extends the `RouterRequest` interface with fields set by specific middleware:
+
+```ts
+declare module './router.js' {
+  interface RouterRequest {
+    id?:         string;          // set by requestId()
+    csrfToken?:  () => string;    // set by csrf()
+  }
+}
+```
+
+### `compress()`
+
+Overrides `res.write` and `res.end` to buffer body data. At `end()` time, if total body ≥ `threshold`, a compressor stream (Brotli > gzip > deflate) is selected and data is flushed through it. Below threshold, data is written directly. `Content-Length` is removed; `Content-Encoding` and `Vary: Accept-Encoding` are set.
+
+### `requestId()`
+
+Reads the configured header from `req.headers`; if `allowFromHeader` is `true` and a value is present it is reused, otherwise `generator()` is called. Sets `req.id` and echoes the ID in the response header.
+
+### `rateLimit()`
+
+Maintains a `Map<key, number[]>` of request timestamps per client. On each request the list is pruned to the current window, then the count is checked against `max`. `X-RateLimit-*` headers are set when `headers: true`.
+
+### `cacheControl()`
+
+Pre-computes the `Cache-Control` string and `Vary` value once at factory time. On each request it sets the headers and always calls `next()`.
+
+### `csrf()`
+
+Double-submit cookie pattern. Reads (or generates) a 256-bit hex token from the cookie, attaches `req.csrfToken()`, then validates the submitted value for state-mutating requests. The cookie is **not** `HttpOnly` so client JavaScript can read it.
+
+### `securityHeaders()`
+
+Pre-computes all header name/value pairs at factory time. On each request it sets them via a `for` loop and always calls `next()`.
+
+### `conditionalGet()`
+
+Overrides `res.write` (buffer to `pending[]`) and `res.end` (check freshness, send 304 or flush buffer). Only GET and HEAD requests participate. Freshness is checked via `isFreshResponse()` using weak ETag comparison per RFC 7232. A 304 response strips `Content-Type`, `Content-Length`, and `Content-Encoding`, retaining `ETag`, `Cache-Control`, `Vary`, `Last-Modified`.
+
+`res.etag(value, strong?)` is implemented in `router.ts` `updateHttpObjects` (not in `middleware.ts`) because it belongs with the other `res.*` helpers. `middleware.ts` reads the header that `res.etag()` sets.
+
+---
+
+## 10. Test Harness and Patterns
 
 ### Test runner
 
@@ -548,12 +618,14 @@ containing `'LOST'`.
 
 | Test file             | Test suites                                                             |
 |-----------------------|-------------------------------------------------------------------------|
-| `router.test.ts`      | compilePlainPath, compileGlob, RegExp, methods, chain, sub-router, URL parsing, cookies, response helpers, registerRoute errors, edge cases |
-| `misc.test.ts`        | json(), formData(), parseBody(), readSize (via limit), logger()         |
+| `router.test.ts`      | compilePlainPath (incl. inline constraints), compileGlob, RegExp, methods, chain, sub-router, URL parsing, cookies, response helpers, registerRoute errors, edge cases |
+| `misc.test.ts`        | json(), formData(), formEncoded(), parseBody(), streamFormData(), readSize (via limit), logger(), chunked transfer, strict mode |
+| `middleware.test.ts`  | compress(), requestId(), rateLimit(), cacheControl(), csrf(), securityHeaders(), conditionalGet() |
 | `apis.test.ts`        | singleton/keyed/ephemeral, buildModule, return conventions, error handling, route params, HTTP verbs, multiple routes, async setup |
-| `static.test.ts`      | validation, basic serving, security headers, caching (304/ETag), method filter, dot-files, traversal, directory redirect, contentType, fallthrough, serveFile, sendFile, ETag stability, concurrency |
-| `jwt-auth.test.ts`    | hashPassword, signToken/verifyToken, login, refresh (rotation), logout, authenticate, authorize, requireRole, requirePermission, custom config, security edge cases |
+| `static.test.ts`      | validation, basic serving, security headers, caching (304/ETag), method filter, dot-files, traversal, directory redirect, contentType, fallthrough, serveFile, sendFile, ETag stability, concurrency, writeIndexOf sorting |
+| `jwt-auth.test.ts`    | hashPassword, signToken/verifyToken (HS*, RS*, ES*), login, refresh (rotation), logout, authenticate, authorize, requireRole, requirePermission, custom config, security edge cases |
 | `git.test.ts`         | factory validation, pktLine, GET /info/refs, POST /git-upload-pack, repository callback, options (strict/timeout/gitPath), unrecognised routes |
+| `openapi.test.ts`     | describe(), openApiSpec(), serializeSpec(), YAML output, path parameters, request/response schemas |
 
 ### Known test quirk
 
@@ -563,48 +635,37 @@ imperfect) design.
 
 ---
 
-## 10. Known Issues and TODOs
+## 11. Known Issues and TODOs
 
-All identified from source comments:
+Open items identified from source comments:
 
-1. **Cookie decoding** (`router.ts`): The cookie parser does not decode `s:`
-   (signed) or `j:` (JSON) prefixes when reading cookies. Only writing uses those prefixes.
-
-2. **Signed cookies** (`router.ts`): `res.cookie(..., { signed: true })` prepends
-   `s:` but does not actually sign the value. Requires a `req.secret` that is
-   never set. Signing integration is an unfilled TODO.
-
-3. **`strict` body option** (`misc.ts`): `BodyOptions.strict` is documented to
+1. **`strict` body option** (`misc.ts`): `BodyOptions.strict` is documented to
    restrict JSON to top-level objects/arrays but the enforcement is marked
    `@remarks Currently reserved for future enforcement; not yet applied.`
 
-4. **`refreshTokenSecret`** (`jwt-auth.ts`): Field exists in `JwtConfig` but
-   refresh tokens are opaque strings, not JWTs. The field is reserved for future
-   use when refresh tokens might be signed JWTs.
+2. **`refreshTokenSecret`** (`jwt-auth.ts`): Field exists in `JwtConfig` but
+   refresh tokens are opaque hex strings, not JWTs. The field is reserved for
+   future use when refresh tokens might be signed JWTs.
 
-5. **Directory listing sort** (`static.ts`): `writeIndexOf()` lists directory
-   entries in filesystem order. There is a TODO about sorting them.
-
-6. **`async setup()` not awaited** (`apis.ts`): `buildModule()` calls
-   `setup.apply(instance)` synchronously. If `setup` is async, the returned
-   Promise is ignored. Pattern: use a `throwIfNotReady()` guard in methods.
-
-7. **Unhandled async errors** (`router.ts`): The try/catch in `listener` only
-   catches synchronous throws. Async middleware that reject unhandled will
-   produce Node.js `UnhandledPromiseRejection` warnings.
-
-8. **`gitCreate` JSDoc** (`git.ts`): The `gitCreate` function has an incomplete
+3. **`gitCreate` JSDoc** (`git.ts`): The `gitCreate` function has an incomplete
    JSDoc comment (the `@param` and `@returns` tags are missing).
+
+**Resolved items (no longer open):**
+
+- ~~Cookie reading/writing~~ — Signed cookies are fully implemented: HMAC-SHA256 signing/verification via `createRouter({ secret })`. `j:` prefix handled on both read and write.
+- ~~Async error catching~~ — The `invoke()` helper wraps every middleware call; `ret instanceof Promise` catches async rejections and routes them to `invokeErrorHandler`.
+- ~~Directory listing sort~~ — `writeIndexOf()` now supports sortable columns via `?C=N;O=D` query params (directories always first).
+- ~~`async setup()` not awaited~~ — `buildModule()` now awaits the `Promise` returned by `setup()` before the module is considered ready.
 
 ---
 
-## 11. Exported API Surface (from `src/index.ts`)
+## 12. Exported API Surface (from `src/index.ts`)
 
 ### Functions
 
 ```ts
 // Router
-createRouter(): Router
+createRouter(prefixOrOpts?: string | RouterOptions, opts?: RouterOptions): Router
 
 // Static
 serveStatic(root: string, opts?: StaticOptions): Middleware
@@ -615,12 +676,24 @@ mime: Mime  // MIME type lookup object
 // Body / misc
 json(opts?: BodyOptions): Middleware
 formData(opts?: BodyOptions): Middleware
+formEncoded(opts?: BodyOptions): Middleware
 parseBody(opts?: BodyOptions): Middleware
+streamFormData(req: RouterRequest, opts?: BodyOptions): AsyncGenerator<FormPartStream>
 logger(opts?: Partial<LoggerOptions>): Middleware
 cors(opts?: Partial<CorsOptions>): Middleware
 
+// Middleware
+compress(opts?: CompressOptions): Middleware
+requestId(opts?: RequestIdOptions): Middleware
+rateLimit(opts: RateLimitOptions): Middleware
+cacheControl(opts?: CacheControlOptions): Middleware
+csrf(opts?: CsrfOptions): Middleware
+securityHeaders(opts?: SecurityHeadersOptions): Middleware
+conditionalGet(): Middleware
+
 // JWT
 createJwtPlugin(userConfig?: Partial<JwtConfig>): JwtPlugin
+createMapTokenStore(): TokenStore
 
 // Git
 gitHandler(opt: GitHandlerOptions): (req, res) => void
@@ -628,6 +701,12 @@ gitCreate(gitDirectory: string, opt: GitCreateOption): Promise<void>
 
 // API builder
 apiBuilder<TInstance>(service: ServiceDefinition<TInstance>): Router
+
+// OpenAPI
+describe<TInstance>(service: OpenApiServiceMeta<TInstance>): OpenApiServiceMeta<TInstance>
+openApiSpec(service: OpenApiServiceMeta<unknown>, opts: SpecOptions): Middleware
+serializeSpec(doc: OpenApiDocument, format?: SpecFormat): string
+DESCRIBE_META: symbol  // metadata key used to attach OpenAPI annotations
 ```
 
 ### Key types
@@ -635,12 +714,15 @@ apiBuilder<TInstance>(service: ServiceDefinition<TInstance>): Router
 ```ts
 // Router
 type Middleware       = (req: RouterRequest, res: RouterResponse, next: NextFunction) => void
-type NextFunction     = () => void
+type NextFunction     = (err?: unknown) => void
+type ErrorHandler     = (err: unknown, req: RouterRequest, res: RouterResponse) => void
 type MiddlewareArg    = Middleware | Router | (Middleware | Router)[]
 
-interface RouterRequest  // extends http.IncomingMessage
-interface RouterResponse // extends http.ServerResponse
+interface RouterOptions  // secret, timeout, trustProxy
+interface RouterRequest  // extends http.IncomingMessage — adds ip, path, params, queries, cookies, json(), text(), formData()
+interface RouterResponse // extends http.ServerResponse — adds send(), json(), status(), redirect(), cookie(), download(), type(), etag()
 interface Router         // the return type of createRouter()
+interface RouteInfo      // { method, path, stripPath } — returned by router.routes()
 interface Layer          // internal route entry
 interface CookieOptions
 interface TlsOptions
@@ -648,22 +730,38 @@ interface TlsOptions
 // Body parsing
 interface BodyOptions
 interface LoggerOptions
-interface FormPart       // multipart part: { headers, content: Buffer }
+interface FormPart        // multipart part: { headers, content: Buffer }
+type FormPartStream       // { headers, stream: Readable }
+
+// Middleware
+interface CompressOptions
+interface RequestIdOptions
+interface RateLimitOptions
+interface CacheControlOptions
+interface CsrfOptions
+interface SecurityHeadersOptions
 
 // JWT
-interface JwtConfig
+interface JwtConfig       // accessTokenSecret, alg, accessTokenPrivateKey/PublicKey, ...
 interface JwtPlugin
 interface UserRecord
 interface TokenPayload
 interface TokenStore
+interface RefreshTokenRecord
 
 // APIs
-interface ApiError
+interface ApiError         // { status?, message?, data? }
 interface ServiceDefinition<TInstance>
 type ServiceMethod<TInstance>
-type ServiceInstance
 type ServiceMethods<TInstance>
 type RouteMap<TInstance>
+
+// OpenAPI
+interface OperationMeta
+interface OpenApiServiceMeta<TInstance>
+interface SpecOptions      // { title, version, format?, ... }
+type SpecFormat            // 'json' | 'yaml'
+interface OpenApiDocument
 
 // Git
 interface GitHandlerOptions
@@ -671,7 +769,7 @@ interface GitHandlerOptions
 
 ---
 
-## 12. Development Workflow
+## 13. Development Workflow
 
 ```bash
 # Build both ESM (tsc) and CJS shim (esbuild) → dist/
@@ -726,7 +824,7 @@ used by the build script.
 
 ---
 
-## 13. Architecture Notes
+## 14. Architecture Notes
 
 ### No middleware error handling layer
 
