@@ -7,7 +7,7 @@
  * Run with:  tsx static.test.ts
  *
  * Fixture layout (under ./fixtures/):
- *   public/
+ *   public/            — recreated programmatically by the before() hook
  *     hello.txt        — plain text file
  *     data.json        — JSON file
  *     index.html       — HTML file (served for directory requests)
@@ -19,7 +19,8 @@
  *     sub/
  *       index.html     — sub-directory index
  *       page.txt       — regular file in sub-directory
- *   single.txt         — standalone file for serveFile tests
+ *   single.txt         — standalone file for serveFile tests (also recreated)
+ *   listing/           — recreated with fixed mtimes for sort-order tests
  */
 
 import assert from 'node:assert/strict';
@@ -28,7 +29,7 @@ import fs     from 'node:fs';
 import net    from 'node:net';
 import nodePath from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, it } from 'node:test';
+import { describe, it, before } from 'node:test';
 
 import createRouter from '../src/router.ts';
 import { serveStatic, serveFile, sendFile } from '../src/static.ts';
@@ -799,7 +800,71 @@ describe('Concurrent requests', () => {
 //   gamma.txt   — 51 bytes, mtime Mar 2023
 //   subdir-a/   — directory
 //   subdir-b/   — directory
+//
+// The listing directory is recreated before these tests run so that mtime
+// values are deterministic regardless of git clone timestamps.
 // ---------------------------------------------------------------------------
+
+before(() => {
+  // Recreate all fixture directories and files so that file contents, sizes,
+  // and mtime values are deterministic regardless of git clone timestamps.
+  // We delete and rebuild rather than patching in-place so that stale or
+  // accidentally added files never affect test results.
+
+  // ── public/ ──────────────────────────────────────────────────────────────
+  fs.rmSync(PUBLIC, { recursive: true, force: true });
+  fs.mkdirSync(nodePath.join(PUBLIC, '.hidden'), { recursive: true });
+  fs.mkdirSync(nodePath.join(PUBLIC, 'sub'),     { recursive: true });
+
+  const t0 = new Date('2024-01-01T00:00:00Z'); // stable mtime for all public files
+
+  const publicFiles: Array<[string, string]> = [
+    ['.dotfile',           'dot'],
+    ['.hidden/secret.txt', 'secret'],
+    ['app.js',             'console.log(1)'],
+    ['data.json',          '{"ok":true,"value":42}'],
+    ['hello.txt',          'hello world - text file'],
+    ['index.html',         '<h1>Index</h1>'],
+    ['style.css',          'body{}'],
+    ['sub/index.html',     '<h1>Sub</h1>'],
+    ['sub/page.txt',       'sub content'],
+  ];
+  for (const [rel, content] of publicFiles) {
+    const p = nodePath.join(PUBLIC, rel);
+    fs.writeFileSync(p, content);
+    fs.utimesSync(p, t0, t0);
+  }
+
+  // ── single.txt ────────────────────────────────────────────────────────────
+  fs.writeFileSync(SINGLE, 'single file content');
+  fs.utimesSync(SINGLE, t0, t0);
+
+  // ── listing/ ──────────────────────────────────────────────────────────────
+  // Distinct mtimes are required because several tests sort by modification
+  // time and assert a specific file order.
+  fs.rmSync(LISTING, { recursive: true, force: true });
+  fs.mkdirSync(nodePath.join(LISTING, 'subdir-a'), { recursive: true });
+  fs.mkdirSync(nodePath.join(LISTING, 'subdir-b'), { recursive: true });
+
+  const jan = new Date('2023-01-01T00:00:00Z');
+  const feb = new Date('2023-02-01T00:00:00Z');
+  const mar = new Date('2023-03-01T00:00:00Z');
+
+  // alpha.txt — 6 bytes, mtime Jan 2023
+  const alphaPath = nodePath.join(LISTING, 'alpha.txt');
+  fs.writeFileSync(alphaPath, 'alpha\n');
+  fs.utimesSync(alphaPath, jan, jan);
+
+  // beta.txt — 20 bytes, mtime Feb 2023
+  const betaPath = nodePath.join(LISTING, 'beta.txt');
+  fs.writeFileSync(betaPath, 'beta beta beta beta\n');
+  fs.utimesSync(betaPath, feb, feb);
+
+  // gamma.txt — 51 bytes, mtime Mar 2023
+  const gammaPath = nodePath.join(LISTING, 'gamma.txt');
+  fs.writeFileSync(gammaPath, 'gamma gamma gamma gamma gamma gamma gamma gamma g\n\n');
+  fs.utimesSync(gammaPath, mar, mar);
+});
 
 /**
  * Issue a request for the LISTING directory using sendFile with indexOf:true.

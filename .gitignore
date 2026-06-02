@@ -6,6 +6,7 @@
 
 node_modules/
 dist/
+.*/
 
 !*.js
 !*.ts
@@ -18,5 +19,3 @@ dist/
 !.npm*
 !LICENSE
 
-!tests/fixtures/**/*
-.DS_Store
