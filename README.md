@@ -955,7 +955,7 @@ git clone http://localhost:3000/repos/myproject
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `repository` | `(req) => string \| null` | **required** | Resolve the absolute path to the bare repository. Return falsy to send 404 |
+| `repository` | `(req) => string \| null | Promise<string \| null>` | **required** | Resolve the absolute path to the bare repository. Return falsy to send 404 |
 | `gitPath` | `string` | `''` | Directory prefix for the `git-upload-pack` binary (include trailing `/`) |
 | `strict` | `boolean` | `false` | When `true`, omits `--no-strict` — git will reject non-bare repositories |
 | `timeout` | `number \| string` | none | Kill `git-upload-pack` after this many **seconds** |

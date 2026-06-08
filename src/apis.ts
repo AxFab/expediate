@@ -30,6 +30,57 @@ import type { SpecOptions, SpecFormat, OpenApiDocument } from './openapi.js';
 // ---------------------------------------------------------------------------
 
 /**
+ * Context object passed as the first argument to every service method handler.
+ *
+ * Replaces the old flat `params` map: route parameters, URL query parameters,
+ * and other request-scoped data are now namespaced to avoid collisions and to
+ * make each data source explicit.
+ *
+ * @example
+ * ```ts
+ * GET: {
+ *   '/items/:id': function (ctx: ApiContext) {
+ *     const id  = ctx.query.route.id;   // ':id' from the path pattern
+ *     const fmt = ctx.query.url.format; // '?format=json' from the query string
+ *     return getItem(id, fmt);
+ *   },
+ * }
+ * ```
+ */
+export interface ApiContext {
+  /** Route and URL query parameters, separated by origin. */
+  query: {
+    /**
+     * Named parameters captured from the route pattern.
+     *
+     * For example, a route registered as `/items/:id` matched against
+     * `/items/42` produces `{ id: '42' }`.
+     */
+    route: Record<string, string>;
+    /**
+     * Parameters decoded from the URL query string.
+     *
+     * Repeated keys are preserved as string arrays.
+     * For example, `?q=hello&tag=a&tag=b` → `{ q: 'hello', tag: ['a', 'b'] }`.
+     */
+    url: Record<string, string | string[]>;
+  };
+  /**
+   * The request path as seen by this API router, after any prefix stripping
+   * performed by a parent `use()` mount.
+   */
+  path: string;
+  /**
+   * Authentication data attached to the request, if present.
+   *
+   * Populated when a middleware (e.g. a JWT `authenticate` middleware) sets
+   * `req.user` before the service method is called.  `undefined` when no
+   * authentication data has been attached.
+   */
+  user?: any;
+}
+
+/**
  * An API error thrown (or rejected) by a service method.
  *
  * When a service method throws or rejects with an object of this shape, the
@@ -52,19 +103,20 @@ export interface ApiError {
  *
  * Called with `this` bound to the current service instance.
  *
- * @param params - Route parameters extracted from the URL (e.g. `{ uid: '42' }`),
- *                 merged with URL query-string parameters.
- * @param body   - Parsed request body (populated by a body-parsing middleware
- *                 such as `json()`).
+ * @param ctx  - Request context containing route parameters, URL query
+ *               parameters, the request path, and optional auth data.
+ *               See {@link ApiContext}.
+ * @param body - Parsed request body (populated by a body-parsing middleware
+ *               such as `json()`).
  * @returns The value to send as the JSON response body, a `Promise` of the
  *          same, or `undefined` / `null` / any falsy value to send **201 No
  *          Content** (useful for mutations that produce no response body).
  */
-export type ServiceMethod<TInstance = ServiceInstance> = (
-  this:   TInstance,
-  params: Record<string, string>,
-  body?:  unknown,
-) => unknown | Promise<unknown>;
+export type ServiceMethod<TInstance = ServiceInstance, TResponse = any, TBody = any> = (
+  this:  TInstance,
+  ctx:   ApiContext,
+  body?: TBody,
+) => TResponse | Promise<TResponse>;
 
 /**
  * The runtime state object that backs a service instance.
@@ -357,6 +409,7 @@ function sendJson(res: RouterResponse, data: unknown): void {
  * @param err - The caught value.
  */
 function sendError(res: RouterResponse, err: unknown): void {
+  // console.error('Api Err', err)
   const e = err as ApiError | undefined;
   const status = e?.status ?? 500;
   if (e?.data !== undefined) {
@@ -397,8 +450,10 @@ function sendError(res: RouterResponse, err: unknown): void {
  * **Route handlers** declared in `service.GET`, `service.POST`, etc. are
  * called with `this` bound to the service instance.  They receive two
  * arguments:
- * 1. `params` — merged route + query-string parameters from `req.params`.
- * 2. `body`   — the parsed request body from `req.body` (requires a
+ * 1. `ctx`  — an {@link ApiContext} object containing `ctx.query.route`
+ *    (named route parameters), `ctx.query.url` (URL query-string parameters),
+ *    `ctx.path` (the request path), and `ctx.user` (optional auth data).
+ * 2. `body` — the parsed request body from `req.body` (requires a
  *    body-parsing middleware such as `json()` to run first).
  *
  * **Return values:**
@@ -431,9 +486,10 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
    *
    * Each handler:
    * 1. Resolves the correct service instance (awaiting setup when needed).
-   * 2. Invokes the service method with `(params, body)`.
-   * 3. Sends the return value as JSON (or 201 if falsy).
-   * 4. Catches thrown / rejected {@link ApiError} objects and translates them
+   * 2. Builds an {@link ApiContext} from the incoming request.
+   * 3. Invokes the service method with `(ctx, body)`.
+   * 4. Sends the return value as JSON (or 201 if falsy).
+   * 5. Catches thrown / rejected {@link ApiError} objects and translates them
    *    into the appropriate HTTP error response.
    *
    * @param routeMap - Map of path patterns to service methods (`undefined` = skip).
@@ -462,14 +518,21 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
       const method = routeMap[path];
 
       register(path, (req: RouterRequest, res: RouterResponse): void => {
-        const params = req.params as Record<string, string>;
-        const body   = (req as any).body;
+        const ctx: ApiContext = {
+          query: {
+            route: req.queries?.route ?? {},
+            url:   req.queries?.url   ?? {},
+          },
+          path: req.path,
+          user: (req as any).user,
+        };
+        const body = (req as any).body;
 
         // Await instance resolution (no-op microtask for singletons; may
         // trigger async buildModule for keyed / ephemeral instances).
         resolveInstance(service, modules, building, req)
           .then(instance => {
-            const ret = method.apply(instance, [params, body]);
+            const ret = method.apply(instance, [ctx, body]);
 
             if (ret instanceof Promise) {
               return ret
@@ -479,7 +542,10 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
                   else
                     res.status(201).end();
                 })
-                .catch(err => sendError(res, err));
+                .catch(err => {
+                  // console.error(err)
+                  sendError(res, err)
+                });
             }
 
             if (ret !== undefined && ret !== null && ret !== false && ret !== 0 && ret !== '')
@@ -487,7 +553,10 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
             else
               res.status(201).end();
           })
-          .catch(err => sendError(res, err));
+          .catch(err =>  {
+            // console.error(err)
+            sendError(res, err)
+          });
       });
     }
   }

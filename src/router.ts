@@ -138,6 +138,10 @@ interface RouterRequest extends http.IncomingMessage {
    * - Plain string values are returned unchanged.
    */
   cookies: Record<string, unknown>;
+  /**
+   *
+   */
+  body?: any;
 
   /**
    * Read and parse the request body as JSON.
@@ -1085,6 +1089,8 @@ function updateHttpObjects(
   });
 
   rReq.json = (opts?: BodyOptions): Promise<unknown | null> => {
+    // If a body-parsing middleware already consumed the stream, return the cached value.
+    if ('body' in (rReq as any)) return Promise.resolve((rReq as any).body ?? null);
     return readReqBody(rReq, resolvedReqOpts(opts), 'application/json')
       .then(ret => {
         if (ret == null) return null;
@@ -1103,6 +1109,9 @@ function updateHttpObjects(
   };
 
   rReq.text = (opts?: BodyOptions): Promise<string | null> => {
+    // If a body-parsing middleware already consumed the stream, return the cached string.
+    const cached = (rReq as any).body;
+    if (typeof cached === 'string') return Promise.resolve(cached);
     return readReqBody(rReq, resolvedReqOpts(opts), null)
       .then(ret => {
         if (ret == null) return null;
@@ -1112,6 +1121,9 @@ function updateHttpObjects(
   };
 
   rReq.formData = (opts?: BodyOptions): Promise<FormPart[] | null> => {
+    // If a body-parsing middleware already consumed the stream, return the cached parts.
+    const cached = (rReq as any).body;
+    if (Array.isArray(cached)) return Promise.resolve(cached as FormPart[]);
     return readReqBody(rReq, resolvedReqOpts(opts), 'multipart/form-data')
       .then(ret => {
         if (ret == null) return null;
@@ -1120,6 +1132,7 @@ function updateHttpObjects(
           (rReq as any).body = parts;
           return parts;
         } catch (ex: any) {
+          // console.error('Body Err', ex)
           return Promise.reject({ status: ex.status ?? 500, message: ex.message ?? String(ex) });
         }
       });
@@ -1440,6 +1453,7 @@ function createRouter(
         try {
           errorHandler(e, req, res);
         } catch (e2) {
+          // console.error('Root Err', e2)
           if (!res.writableEnded) res.status(500).end(`Error ${method} ${url}`);
         }
       } else {

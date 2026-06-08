@@ -14,6 +14,7 @@ import { describe, it } from 'node:test';
 
 import createRouter from '../src/router.ts';
 import type { Middleware, RouterRequest, RouterResponse } from '../src/router.js';
+import { json, parseBody, formData } from '../src/misc.ts';
 
 
 // ---------------------------------------------------------------------------
@@ -1747,6 +1748,52 @@ describe('req.text() / req.formData() extension methods (Task #18)', () => {
       headers: { 'content-type': 'text/plain' },
     });
     assert.equal(errorStatus, 413, 'FIX-09: should reject with status 413');
+  });
+
+  it('req.json() returns cached req.body when json() middleware already ran', async () => {
+    const router = createRouter();
+    let result: unknown;
+    router.post('/', json(), async (req, res) => {
+      // Body stream already consumed by json() middleware — req.json() must return the cached value.
+      result = await (req as any).json();
+      (res as any).status(200).send('ok');
+    });
+    await makeBodyRequest(router, {
+      body:    Buffer.from('{"cached":true}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.deepEqual(result, { cached: true });
+  });
+
+  it('req.text() returns cached req.body when parseBody() middleware already ran', async () => {
+    const router = createRouter();
+    let result: unknown;
+    router.post('/', parseBody(), async (req, res) => {
+      result = await (req as any).text();
+      (res as any).status(200).send('ok');
+    });
+    await makeBodyRequest(router, {
+      body:    Buffer.from('hello cached'),
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(result, 'hello cached');
+  });
+
+  it('req.formData() returns cached req.body when formData() middleware already ran', async () => {
+    const boundary = 'CachedBoundary';
+    const part     = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="f"\r\n\r\ncached\r\n--${boundary}--\r\n`);
+    const router   = createRouter();
+    let result: unknown;
+    router.post('/', formData(), async (req, res) => {
+      result = await (req as any).formData();
+      (res as any).status(200).send('ok');
+    });
+    await makeBodyRequest(router, {
+      body:    part,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    });
+    assert.ok(Array.isArray(result));
+    assert.equal((result as any[])[0].content.toString(), 'cached');
   });
 });
 

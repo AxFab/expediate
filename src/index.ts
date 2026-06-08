@@ -87,6 +87,7 @@ export type {
     ServiceDefinition,
     ApiRouter,
     ApiRouterExtensions,
+    ApiContext,
 } from './apis.js';
 
 // ── OpenAPI spec generation ───────────────────────────────────────────────────

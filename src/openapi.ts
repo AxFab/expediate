@@ -20,7 +20,7 @@
  */
 'use strict';
 
-import type { ServiceMethod, ServiceInstance, ServiceDefinition } from './apis.js';
+import type { ServiceMethod, ServiceInstance, ServiceDefinition, ApiContext } from './apis.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -428,11 +428,11 @@ export function describe<TInstance extends ServiceInstance = ServiceInstance>(
   // Wrap the handler so we have a fresh function object to attach metadata to,
   // avoiding unexpected mutations of functions shared across route maps.
   const described: ServiceMethod<TInstance> = function (
-    this:   TInstance,
-    params: Record<string, string>,
-    body?:  unknown,
+    this: TInstance,
+    ctx:  ApiContext,
+    body?: unknown,
   ): unknown {
-    return handler.apply(this, [params, body]);
+    return handler.apply(this, [ctx, body]);
   };
 
   // Attach metadata as a non-enumerable property so it is invisible to

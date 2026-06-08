@@ -22,7 +22,7 @@ import { describe, it } from 'node:test';
 import createRouter         from '../src/router.ts';
 import { json }             from '../src/misc.ts';
 import apiBuilder           from '../src/apis.ts';
-import type { ServiceDefinition, ApiError, ServiceInstance } from '../src/apis.ts';
+import type { ServiceDefinition, ApiError, ServiceInstance, ApiContext } from '../src/apis.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP test helper
@@ -547,11 +547,11 @@ describe('Error handling', () => {
 // ---------------------------------------------------------------------------
 
 describe('Route parameters and request body', () => {
-  it('route :params are passed as the first argument to the handler', async () => {
+  it('route :params are available via ctx.query.route', async () => {
     const service: ServiceDefinition = {
       GET: {
-        '/items/:id': function (params: any) {
-          return { id: params.id };
+        '/items/:id': function (ctx: ApiContext) {
+          return { id: ctx.query.route.id };
         },
       },
     };
@@ -559,11 +559,11 @@ describe('Route parameters and request body', () => {
     assert.equal(r.json<any>().id, '42');
   });
 
-  it('query-string parameters are merged into params', async () => {
+  it('URL query-string parameters are available via ctx.query.url', async () => {
     const service: ServiceDefinition = {
       GET: {
-        '/search': function (params: any) {
-          return { q: params.q };
+        '/search': function (ctx: ApiContext) {
+          return { q: ctx.query.url.q };
         },
       },
     };
@@ -571,10 +571,22 @@ describe('Route parameters and request body', () => {
     assert.equal(r.json<any>().q, 'hello');
   });
 
+  it('ctx.path contains the request path', async () => {
+    const service: ServiceDefinition = {
+      GET: {
+        '/ping': function (ctx: ApiContext) {
+          return { path: ctx.path };
+        },
+      },
+    };
+    const r = await request(service, { path: '/ping' });
+    assert.equal(r.json<any>().path, '/ping');
+  });
+
   it('POST body is passed as the second argument', async () => {
     const service: ServiceDefinition = {
       POST: {
-        '/echo': function (_params: any, body: any) {
+        '/echo': function (_ctx: ApiContext, body: any) {
           return { received: body };
         },
       },
@@ -590,8 +602,8 @@ describe('Route parameters and request body', () => {
   it('route params and body are both accessible in the same handler', async () => {
     const service: ServiceDefinition = {
       PUT: {
-        '/items/:id': function (params: any, body: any) {
-          return { id: params.id, ...body };
+        '/items/:id': function (ctx: ApiContext, body: any) {
+          return { id: ctx.query.route.id, ...body };
         },
       },
     };
@@ -652,22 +664,22 @@ describe('Multiple routes on the same service', () => {
     data: () => ({ items: { '1': { name: 'alpha' }, '2': { name: 'beta' } } }),
     GET: {
       '/items': function (this: any) { return Object.values(this.items); },
-      '/items/:id': function (this: any, params: any) {
-        if (!this.items[params.id]) throw { status: 404, message: 'Not found' };
-        return this.items[params.id];
+      '/items/:id': function (this: any, ctx: ApiContext) {
+        if (!this.items[ctx.query.route.id]) throw { status: 404, message: 'Not found' };
+        return this.items[ctx.query.route.id];
       },
     },
     POST: {
-      '/items': function (this: any, _params: any, body: any) {
+      '/items': function (this: any, _ctx: ApiContext, body: any) {
         const id = String(Object.keys(this.items).length + 1);
         this.items[id] = body;
         return undefined; // 201
       },
     },
     DELETE: {
-      '/items/:id': function (this: any, params: any) {
-        if (!this.items[params.id]) throw { status: 404, message: 'Not found' };
-        delete this.items[params.id];
+      '/items/:id': function (this: any, ctx: ApiContext) {
+        if (!this.items[ctx.query.route.id]) throw { status: 404, message: 'Not found' };
+        delete this.items[ctx.query.route.id];
         return undefined; // 201
       },
     },

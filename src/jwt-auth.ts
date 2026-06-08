@@ -59,7 +59,7 @@ export interface UserRecord {
    * SHA-256 hex digest of the user's password.
    * Replace with a bcrypt/argon2 hash in production.
    */
-  passwordHash:  string;
+  passwordHash?:  string;
   /** Role labels assigned to this user (e.g. `'admin'`, `'editor'`). */
   roles?:        string[];
   /**
@@ -222,7 +222,7 @@ export interface JwtConfig {
    * Fetch a user record by subject (username or stable ID).
    * Return `undefined` (or any falsy value) when the user does not exist.
    */
-  fetchUser:          (sub: string) => UserRecord | undefined;
+  fetchUser:          (sub: string) => UserRecord | undefined | Promise<UserRecord | undefined>;
   /**
    * Return `true` when the supplied plain-text `password` is valid for
    * `user`, `false` otherwise.
@@ -230,14 +230,14 @@ export interface JwtConfig {
    * The default implementation compares SHA-256 hashes; replace with a
    * timing-safe bcrypt/argon2 check in production.
    */
-  isPasswordValid:    (user: UserRecord, password: string) => boolean;
+  isPasswordValid:    (user: UserRecord, password: string) => boolean | Promise<boolean>;
   /**
    * Build the JWT access-token payload for a user.
    * The `iss`, `iat`, and `exp` claims are added automatically.
    * When `sub` is absent from the returned object, `config.username(user)`
    * is used as the fallback.
    */
-  payload:            (user: UserRecord) => Partial<TokenPayload>;
+  payload:            (user: UserRecord) => Partial<TokenPayload> | Promise<Partial<TokenPayload>>;
   /**
    * Refresh-token store.  When absent, refresh tokens are **not** issued:
    * `POST /auth/login` omits `refreshToken` from its response, and
@@ -756,10 +756,10 @@ function refreshVerifyKey(cfg: JwtConfig): string {
  * @returns An {@link AuthResult} discriminated union.
  */
 async function authenticateUser(username: string, password: string, config: JwtConfig): Promise<AuthResult> {
-  const user = config.fetchUser(username);
+  const user = await config.fetchUser(username);
   if (!user) return { success: false, error: 'User not found' };
 
-  if (!config.isPasswordValid(user, password))
+  if (!await config.isPasswordValid(user, password))
     return { success: false, error: 'Incorrect password' };
 
   return issueTokenPair(user, config);
@@ -854,7 +854,7 @@ async function renewAccessToken(refreshToken: string, config: JwtConfig): Promis
   if (!record)
     return { success: false, error: 'Invalid or revoked refresh token' };
 
-  const user = config.fetchUser(record.sub);
+  const user = await config.fetchUser(record.sub);
   if (!user) {
     await config.refreshTokenStore.delete(jti);
     return { success: false, error: 'User not found' };

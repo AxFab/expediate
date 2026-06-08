@@ -393,6 +393,161 @@ describe('POST /git-upload-pack', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite 4b — GET /info/refs?service=git-receive-pack (push advertisement)
+// ---------------------------------------------------------------------------
+
+describe('GET /info/refs (git-receive-pack)', () => {
+  it('returns 200 with correct Content-Type', async () => {
+    const mw = gitHandler({ repository: () => BARE_REPO });
+    const r  = await request(mw, {
+      method: 'GET',
+      path:   '/info/refs?service=git-receive-pack',
+    });
+    assert.equal(r.statusCode, 200);
+    assert.ok(
+      (r.headers['content-type'] as string)?.includes('application/x-git-receive-pack-advertisement'),
+      `Unexpected Content-Type: ${r.headers['content-type']}`,
+    );
+  });
+
+  it('sets Cache-Control: no-cache', async () => {
+    const mw = gitHandler({ repository: () => BARE_REPO });
+    const r  = await request(mw, {
+      method: 'GET',
+      path:   '/info/refs?service=git-receive-pack',
+    });
+    assert.equal(r.headers['cache-control'], 'no-cache');
+  });
+
+  it('response body starts with the correct PKT-LINE banner', async () => {
+    const mw = gitHandler({ repository: () => BARE_REPO });
+    const r  = await request(mw, {
+      method: 'GET',
+      path:   '/info/refs?service=git-receive-pack',
+    });
+    // "# service=git-receive-pack\n" = 27 bytes → frame = 31 = 0x1f
+    const bodyText = r.text();
+    assert.ok(
+      bodyText.startsWith('001f# service=git-receive-pack\n'),
+      `Expected PKT-LINE banner, got: ${JSON.stringify(bodyText.slice(0, 40))}`,
+    );
+  });
+
+  it('returns 404 when opt.repository returns falsy', async () => {
+    const mw = gitHandler({ repository: () => null });
+    const r  = await request(mw, {
+      method: 'GET',
+      path:   '/info/refs?service=git-receive-pack',
+    });
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('returns 500 when git-receive-pack binary is not found', async () => {
+    const mw = gitHandler({
+      repository: () => BARE_REPO,
+      gitPath:    '/nonexistent/path/',
+    });
+    const r = await request(mw, {
+      method: 'GET',
+      path:   '/info/refs?service=git-receive-pack',
+    });
+    assert.ok(
+      r.statusCode === 500 || r.text().includes('unavailable'),
+      `Expected spawn failure response, got ${r.statusCode}: ${r.text().slice(0, 80)}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 4c — POST /git-receive-pack (push transfer)
+// ---------------------------------------------------------------------------
+
+describe('POST /git-receive-pack', () => {
+  it('returns 200 with correct Content-Type', async () => {
+    const mw = gitHandler({ repository: () => BARE_REPO });
+    // A flush-only body causes git-receive-pack to respond and exit cleanly.
+    const body = Buffer.from('0000', 'utf8');
+    const r    = await request(mw, {
+      method:  'POST',
+      path:    '/git-receive-pack',
+      headers: { 'content-type': 'application/x-git-receive-pack-request' },
+      body,
+    });
+    assert.ok(
+      r.statusCode === 200 || r.statusCode === 500,
+      `Unexpected status: ${r.statusCode}`,
+    );
+    if (r.statusCode === 200) {
+      assert.ok(
+        (r.headers['content-type'] as string)?.includes('application/x-git-receive-pack-result'),
+        `Wrong Content-Type: ${r.headers['content-type']}`,
+      );
+    }
+  });
+
+  it('sets Cache-Control: no-cache', async () => {
+    const mw   = gitHandler({ repository: () => BARE_REPO });
+    const body = Buffer.from('0000', 'utf8');
+    const r    = await request(mw, {
+      method:  'POST',
+      path:    '/git-receive-pack',
+      headers: { 'content-type': 'application/x-git-receive-pack-request' },
+      body,
+    });
+    assert.equal(r.headers['cache-control'], 'no-cache');
+  });
+
+  it('returns 415 for wrong Content-Type', async () => {
+    const mw = gitHandler({ repository: () => BARE_REPO });
+    const r  = await request(mw, {
+      method:  'POST',
+      path:    '/git-receive-pack',
+      headers: { 'content-type': 'application/json' },
+      body:    Buffer.from('{}'),
+    });
+    assert.equal(r.statusCode, 415);
+  });
+
+  it('returns 415 when Content-Type is missing', async () => {
+    const mw = gitHandler({ repository: () => BARE_REPO });
+    const r  = await request(mw, {
+      method: 'POST',
+      path:   '/git-receive-pack',
+      body:   Buffer.from('data'),
+    });
+    assert.equal(r.statusCode, 415);
+  });
+
+  it('returns 404 when opt.repository returns falsy', async () => {
+    const mw = gitHandler({ repository: () => false });
+    const r  = await request(mw, {
+      method:  'POST',
+      path:    '/git-receive-pack',
+      headers: { 'content-type': 'application/x-git-receive-pack-request' },
+      body:    Buffer.from('0000', 'utf8'),
+    });
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('returns 500 when git-receive-pack binary is not found', async () => {
+    const mw = gitHandler({
+      repository: () => BARE_REPO,
+      gitPath:    '/nonexistent/',
+    });
+    const r = await request(mw, {
+      method:  'POST',
+      path:    '/git-receive-pack',
+      headers: { 'content-type': 'application/x-git-receive-pack-request' },
+      body:    Buffer.from('0000', 'utf8'),
+    });
+    assert.ok(
+      r.statusCode === 500 || r.text().includes('unavailable'),
+      `Expected 500, got ${r.statusCode}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 5 — opt.repository callback
 // ---------------------------------------------------------------------------
 

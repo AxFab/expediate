@@ -48,7 +48,7 @@ export interface GitHandlerOptions {
    * repository: (req) => path.join('/srv/git', req.params.repo + '.git')
    * ```
    */
-  repository: (req: RouterRequest) => string | null | undefined | false;
+  repository: (req: RouterRequest) => string | null | undefined | false | Promise<string | null | undefined | false>;
 
   /**
    * Directory that contains the `git-upload-pack` executable, including a
@@ -181,11 +181,13 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
 
   const gitHome = opt.gitPath ?? '';
 
-  return (req: RouterRequest, res: RouterResponse): void => {
+  return async (req: RouterRequest, res: RouterResponse): Promise<void> => {
     // Resolve the repository path for this request.
-    const gitDirectory = opt.repository(req);
-    if (!gitDirectory)
-      return void res.status(404).send('Repository not found');
+    const gitDirectory = await opt.repository(req);
+    if (!gitDirectory) {
+      res.status(404).send('Repository not found');
+      return
+    }
 
     const urlPath = req.path; // sub-path after the mount prefix
 
@@ -197,9 +199,11 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
       if (service === 'git-upload-pack')
         args = buildArgs(opt, ['--stateless-rpc', '--advertise-refs', gitDirectory]);
       else if (service === 'git-receive-pack')
-        args = [gitDirectory]
-      else
-        return void res.status(403).send(`Service ${service} is not supported`);
+        args = ['--stateless-rpc', '--advertise-refs', gitDirectory]
+      else {
+        res.status(403).send(`Service ${service} is not supported`);
+        return
+      }
 
       res.setHeader('Content-Type', `application/x-${service}-advertisement`);
       res.setHeader('Cache-Control', 'no-cache');
@@ -243,16 +247,20 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
       const contentType = (req.headers['content-type'] as string) || '';
       const service = urlPath.substring(1);
 
-      if (contentType !== `application/x-${service}-request`)
-        return void res.status(415).send('Unsupported Media Type');
+      if (contentType !== `application/x-${service}-request`) {
+        res.status(415).send('Unsupported Media Type');
+        return
+      }
 
       let args = [];
       if (service === 'git-upload-pack')
         args = buildArgs(opt, ['--stateless-rpc', gitDirectory]);
       else if (service === 'git-receive-pack')
-        args = [gitDirectory]
-      else
-        return void res.status(403).send(`Service ${service} is not supported`);
+        args = ['--stateless-rpc', gitDirectory]
+      else {
+        res.status(403).send(`Service ${service} is not supported`);
+        return
+      }
 
       res.setHeader('Content-Type', `application/x-${service}-result`);
       res.setHeader('Cache-Control', 'no-cache');
