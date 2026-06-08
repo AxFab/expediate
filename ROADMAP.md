@@ -1,99 +1,122 @@
-# Expediate — Roadmap
+# Expediate Roadmap
 
-This document lists all known defects, missing features, and improvement ideas
-for the **expediate** package, grouped by category and ordered by priority
-within each section.
+Date: 2026-06-08
 
----
+This roadmap is distilled from the full audit in [AUDIT.md](AUDIT.md). Keep
+`AUDIT.md` as the detailed reasoning document and this file as the execution
+checklist.
 
-## Part 1 — Bug Fixes
+## Milestone 1 - Hardening And Compatibility Baseline
 
-These are correctness or safety issues that should be resolved before the
-package is used in any production environment.
+Goal: remove the highest-risk correctness issues before adding broad new API
+surface.
 
----
+Success criteria:
 
-### 🔴 Critical
+- Existing `npm test` suite still passes.
+- New regression tests cover every item below.
+- Body-parser behavior is consistent across source, tests, README, and docs.
+- A first `docs/compatibility.md` matrix exists.
 
-_None_
+Tasks:
 
-### 🟠 High
+- [ ] Fix method route endpoint matching so `get('/users')` does not match
+  `/users/42`, while `use('/users')` still acts as a prefix mount.
+- [ ] Catch malformed percent encodings in `serveStatic()` and return a
+  controlled `400 Bad Request`.
+- [ ] Escape text and attributes in `writeIndexOf()` directory listings.
+- [ ] Fix or remove the `json()` middleware override of `res.json()` so JSON
+  responses always set `Content-Type`.
+- [ ] Reset or reject global/sticky user RegExp route patterns.
+- [ ] Decide body parser content-type policy: Express-style pass-through or
+  strict `415`; update tests and docs accordingly.
+- [ ] Add `test:coverage` using Node's native test coverage.
 
-_None_
+## Milestone 2 - Express Migration Ergonomics
 
-### 🟡 Medium
+Goal: make small Express apps easier to port without compromising Expediate's
+small core.
 
-_None_
+Success criteria:
 
-## Part 2 — Missing Features
+- Common Express request/response helpers work.
+- A documented migration example runs on Expediate with minimal edits.
 
-These are capabilities commonly expected of a production HTTP server framework
-that expediate currently lacks entirely.
+Tasks:
 
----
+- [ ] Add `req.query` alias to `req.queries.url`.
+- [ ] Add `req.get()` / `req.header()`.
+- [ ] Add `req.hostname`, `req.protocol`, `req.secure`, and `req.ips`.
+- [ ] Track `req.baseUrl` through nested routers.
+- [ ] Add `res.set()` / `res.header()` and `res.get()`.
+- [ ] Add `res.append()`, `res.vary()`, `res.location()`, `res.clearCookie()`,
+  `res.sendStatus()`, `res.attachment()`, and `res.locals`.
+- [ ] Validate `res.status()` codes as integers in the `100..999` range.
+- [ ] Add `router.route(path).get(...).post(...)`.
+- [ ] Decide and document `HEAD`, `OPTIONS`, and automatic `405` behavior.
 
-### 🔴 Critical (production blockers)
+## Milestone 3 - Error And Middleware Model
 
-_None_
+Goal: close the biggest semantic gap in Express middleware composition.
 
-### 🟠 High
+Success criteria:
 
-_None_
+- Error behavior can be scoped to routers.
+- Express-style error middleware examples can be ported.
 
-### 🟡 Medium
+Tasks:
 
-_None_
+- [ ] Add ordered error middleware support, either by 4-argument arity or an
+  explicit `router.useError()` API.
+- [ ] Preserve `router.onError()` as a simple fallback.
+- [ ] Implement or explicitly reject `next('route')`.
+- [ ] Implement or explicitly reject `next('router')`.
+- [ ] Add `router.param(name, handler)`.
+- [ ] Add nested router tests for error propagation and route skipping.
 
+## Milestone 4 - Parser And Static Completeness
 
-## Part 3 — Nice-to-Have
+Goal: make request parsing and file serving production-complete while staying
+dependency-light.
 
-Ideas that would make the package more ergonomic or feature-complete but are
-not strictly necessary for correctness or stability.
+Tasks:
 
----
+- [ ] Add `raw()` middleware.
+- [ ] Add exported `text()` middleware.
+- [ ] Add Brotli request decompression.
+- [ ] Add parser `type` option and optional verify hook.
+- [ ] Improve cookie encoding/decoding for semicolons, quotes, spaces, and
+  percent-encoded values.
+- [ ] Consider byte-range support for `serveStatic()`, `serveFile()`, and
+  `res.download()`.
+- [ ] Consider a richer `trustProxy` option beyond boolean.
 
-#### NTH-01 · WebSocket upgrade support
+## Milestone 5 - Measurement And Assurance
 
-The router has no hook for the HTTP `upgrade` event, making WebSocket servers
-impossible to co-locate with the HTTP API on the same port.
+Goal: make "lightweight" and "safe" measurable.
 
-**Proposal:** expose `router.ws(path, handler)` that intercepts the upgrade
-handshake and manages the WebSocket lifecycle, or at minimum expose
-`router.onUpgrade(fn)` to give the raw event to the caller.
+Tasks:
 
----
+- [ ] Add a benchmark harness comparing Expediate, Node `http`, and Express.
+- [ ] Cover scenarios: hello world, JSON, params, middleware chains, body
+  parsing, static files, compression, 404, and 304.
+- [ ] Add stress tests for concurrency, keep-alive, slow uploads, aborted
+  uploads, rate-limit key growth, compression thresholds, and static files.
+- [ ] Add a security request corpus for malformed URLs, traversal, cookies,
+  CORS, CSRF, JWT, multipart, and request-smuggling-adjacent cases.
+- [ ] Add package smoke tests for ESM import, CJS require, declarations, and
+  `npm pack --dry-run`.
+- [ ] Add CI matrix across supported Node versions.
 
-#### NTH-02 · CLI scaffold (`npx expediate init`)
+## Later Product Ideas
 
-A `create-expediate` CLI or an `npx expediate init` command that scaffolds a
-minimal server project (TypeScript config, entry point, a sample route) would
-significantly lower the time-to-first-request for new users.
+These are useful, but should wait until the hardening and compatibility baseline
+is in place.
 
----
-
-#### NTH-03 · Request body schema validation hook
-
-`apiBuilder` service methods receive the parsed body as-is. Adding an optional
-`schema` field per route (compatible with a simple hand-rolled validator or an
-external library like Zod or Valibot) would enable automatic 400 responses for
-malformed input before the handler is ever called.
-
----
-
-#### NTH-04 · Cluster / multi-process helper
-
-Node.js `cluster` module integration (fork workers, handle signals, zero-downtime
-restarts) is boilerplate that every production server has to write. A thin
-`cluster(router, opts)` wrapper would make expediate self-contained for
-single-host deployments.
-
----
-
-## Summary Table
-
-| ID       | Category    | Priority | Title                                          |
-|----------|-------------|----------|------------------------------------------------|
-| NTH-01   | Nice-to-have| —        | WebSocket upgrade support                      |
-| NTH-02   | Nice-to-have| —        | CLI scaffold (`npx expediate init`)            |
-| NTH-03   | Nice-to-have| —        | Request body schema validation hook            |
-| NTH-04   | Nice-to-have| —        | Cluster / multi-process helper                 |
+- [ ] WebSocket or HTTP upgrade hooks.
+- [ ] `create-expediate` / `npx expediate init` scaffold.
+- [ ] OpenAPI-backed request and response validation.
+- [ ] Keyed `apiBuilder` instance eviction and dispose hooks.
+- [ ] Git Smart HTTP auth examples and full clone/fetch/push integration
+  tests with valid bare repository fixtures.
+- [ ] Cluster or multi-process helper.
