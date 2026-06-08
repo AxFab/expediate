@@ -630,6 +630,34 @@ app.use(securityHeaders({ hsts: false }));
 
 Every header can be individually disabled (pass `false`) or overridden with a custom string.
 
+### `cors()`
+
+Adds Cross-Origin Resource Sharing headers to responses. CORS headers are only set when the request includes an `Origin` header (standard browser behaviour). OPTIONS preflight requests are handled and terminated; other requests call `next()`.
+
+```ts
+import { cors } from 'expediate';
+
+app.use(cors({ origin: 'https://example.com' }));
+
+// Allow multiple origins, credentials, and custom max-age
+app.use(cors({
+  origin: ['https://app.example.com', 'https://admin.example.com'],
+  allowCredentials: true,
+  maxAge: 86400,
+}));
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `origin` | `string \| string[]` | `'*'` | Value of `Access-Control-Allow-Origin` |
+| `allowHeaders` | `string \| string[]` | `'Accept, Content-Type, Authorization'` | Allowed request headers |
+| `allowMethods` | `string \| string[]` | `'GET,HEAD,PUT,PATCH,POST,DELETE'` | Allowed HTTP methods |
+| `allowCredentials` | `boolean` | — | Set `Access-Control-Allow-Credentials: true` |
+| `maxAge` | `number` | — | Preflight cache lifetime in seconds |
+| `vary` | `string \| string[]` | — | Value of the `Vary` response header |
+| `optionsStatus` | `number` | `204` | Status code for OPTIONS preflight responses |
+| `preflight` | `(req) => boolean` | — | Custom guard: return `false` to reject the request (OPTIONS → 403, others → 400) |
+
 ---
 
 ## Request logging

@@ -34,7 +34,9 @@ export type {
   Middleware,
   MiddlewareArg,
   NextFunction,
+  ErrorHandler,
   Layer,
+  RouteInfo,
   CookieOptions,
   TlsOptions,
   StringMap,
@@ -56,6 +58,7 @@ export type {
   LoggerOptions,
   FormPart,
   FormPartStream,
+  CorsOptions,
 } from './misc.js';
 
 // ── JWT Authentication ────────────────────────────────────────────────────────
@@ -67,6 +70,8 @@ export type {
   JwtConfig,
   TokenStore,
   RefreshTokenRecord,
+  TokenPayload,
+  UserRecord,
 } from './jwt-auth.js';
 
 // ── Git repository ────────────────────────────────────────────────────────────
