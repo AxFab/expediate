@@ -505,6 +505,39 @@ describe('serveStatic — directory traversal protection', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite 7b — serveStatic: malformed percent-encoding → 400
+// ---------------------------------------------------------------------------
+
+describe('serveStatic — malformed percent-encoding', () => {
+  it('returns 400 for a path with an invalid percent sequence (%zz)', async () => {
+    const mw = serveStatic(PUBLIC);
+    const r  = await request(mw, { path: '/%zz' });
+    assert.equal(r.statusCode, 400);
+  });
+
+  it('returns 400 for a truncated percent sequence (%a)', async () => {
+    const mw = serveStatic(PUBLIC);
+    const r  = await request(mw, { path: '/foo/%a' });
+    assert.equal(r.statusCode, 400);
+  });
+
+  it('returns 400 for a bare percent sign', async () => {
+    const mw = serveStatic(PUBLIC);
+    const r  = await request(mw, { path: '/foo/%' });
+    assert.equal(r.statusCode, 400);
+  });
+
+  it('still serves valid files after a well-formed percent-encoded path', async () => {
+    // %2F is a forward slash — after decoding it produces '/hello.txt' which
+    // is then re-anchored under opts.root (no traversal possible), so 404.
+    // The important thing is that no 500 / unhandled exception occurs.
+    const mw = serveStatic(PUBLIC);
+    const r  = await request(mw, { path: '/hello.txt' });
+    assert.equal(r.statusCode, 200, 'valid path must still be served after fix');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 8 — serveStatic: directory / index.html redirect
 // ---------------------------------------------------------------------------
 
@@ -864,6 +897,12 @@ before(() => {
   const gammaPath = nodePath.join(LISTING, 'gamma.txt');
   fs.writeFileSync(gammaPath, 'gamma gamma gamma gamma gamma gamma gamma gamma g\n\n');
   fs.utimesSync(gammaPath, mar, mar);
+
+  // xss.txt — a file whose name contains HTML special characters to verify
+  // that writeIndexOf properly escapes file names in the generated HTML.
+  const xssPath = nodePath.join(LISTING, '<xss>"&test".txt');
+  fs.writeFileSync(xssPath, 'xss test');
+  fs.utimesSync(xssPath, jan, jan);
 });
 
 /**
@@ -1068,5 +1107,91 @@ describe('writeIndexOf — dynamic column header links', () => {
   it('when sorted by mtime descending: Last modified link toggles to ascending', async () => {
     const { body } = await requestListing('/?C=M;O=D');
     assert.ok(body.includes('href="?C=M;O=A"'), 'Last modified header should toggle to ascending when active+descending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 17 — writeIndexOf: HTML escaping
+// ---------------------------------------------------------------------------
+
+/**
+ * Like requestListing but allows overriding the req.path passed to sendFile,
+ * so we can verify that special characters in the URL path are escaped in the
+ * generated HTML title and heading.
+ */
+function requestListingWithPath(reqPath: string): Promise<FakeResponse> {
+  const opts = {
+    root: LISTING, redirect: false, indexOf: true,
+    fallthrough: false, dotfiles: 'deny',
+    headers: {}, immutable: false,
+  };
+
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((rawReq, rawRes) => {
+      const router = createRouter();
+      router.get('/', (req: any, res: any) => {
+        req.url  = reqPath;
+        req.path = reqPath.split('?')[0];
+        (sendFile as any)(req, res, LISTING, opts);
+      });
+      (router.listener as any)(rawReq, rawRes, () => {
+        rawRes.statusCode = 404;
+        rawRes.end('not found');
+      });
+    });
+
+    server.listen(0, '127.0.0.1', () => {
+      const addr   = server.address() as net.AddressInfo;
+      const chunks: Buffer[] = [];
+
+      const req = http.request(
+        { host: '127.0.0.1', port: addr.port, method: 'GET', path: '/' },
+        (res) => {
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            server.close();
+            resolve({ statusCode: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString() });
+          });
+        },
+      );
+      req.on('error', (e) => { server.close(); reject(e); });
+      req.end();
+    });
+  });
+}
+
+describe('writeIndexOf — HTML escaping', () => {
+  it('escapes HTML special characters in urlPath inside <title>', async () => {
+    const { body } = await requestListingWithPath('/<script>alert(1)</script>');
+    assert.ok(!body.includes('<script>alert'), 'raw <script> must not appear in title');
+    assert.ok(body.includes('&lt;script&gt;'), 'title must contain escaped form');
+  });
+
+  it('escapes HTML special characters in urlPath inside <h1>', async () => {
+    const { body } = await requestListingWithPath('/path?x=1&y=<b>bold</b>');
+    assert.ok(!body.includes('<b>bold</b>'), 'raw <b> tag must not appear in heading');
+    assert.ok(body.includes('&lt;b&gt;bold&lt;/b&gt;'), 'heading must contain escaped form');
+  });
+
+  it('escapes HTML special characters in file names (display text)', async () => {
+    // The before() hook creates a file named '<xss>"&test".txt' in LISTING.
+    const { body } = await requestListing('/');
+    // Raw angle brackets must not appear as a tag in the response body.
+    assert.ok(!body.includes('<xss>'), 'raw <xss> tag must not appear in listing');
+    // The escaped form must appear as the link text.
+    assert.ok(body.includes('&lt;xss&gt;'), 'file name must be HTML-escaped in display text');
+  });
+
+  it('percent-encodes special characters in file entry href attributes', async () => {
+    // The href for '<xss>"&test".txt' must use percent-encoding, not raw special chars.
+    const { body } = await requestListing('/');
+    assert.ok(body.includes('href="%3Cxss%3E'), 'href must use %3C / %3E for < / >');
+    assert.ok(!body.includes('href="<xss>'), 'href must not contain raw < character');
+  });
+
+  it('does not double-escape normal file names', async () => {
+    // Plain ASCII names must appear verbatim in both href and display text.
+    const { body } = await requestListing('/');
+    assert.ok(body.includes('href="alpha.txt">alpha.txt</a>'), 'plain ASCII names must be unchanged');
   });
 });

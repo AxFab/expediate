@@ -177,6 +177,9 @@ const HTTP = {
   /** 304 Not Modified — sent for conditional GET cache hits. */
   NOT_MODIFIED:       (res: RouterResponse, opts: ResolvedOptions) =>
     { res.status(304, opts.headers).end() },
+  /** 400 Bad Request — sent when the URL path contains malformed percent-encoding. */
+  BAD_REQUEST:        (res: RouterResponse, opts: ResolvedOptions) =>
+    res.status(400, opts.headers).send('Bad Request'),
   /** 403 Forbidden — sent for denied dot-files or path traversal attempts. */
   FORBIDDEN:          (res: RouterResponse, opts: ResolvedOptions) =>
     res.status(403, opts.headers).send('Forbidden'),
@@ -297,6 +300,39 @@ function parseTokenList(str: string): string[] {
 function parseHttpDate(date: string | undefined): number {
   const timestamp = date ? Date.parse(date) : NaN;
   return typeof timestamp === 'number' ? timestamp : NaN;
+}
+
+/**
+ * Escape HTML special characters so that a raw string can be safely embedded
+ * in HTML text content or attribute values.
+ *
+ * Handles `&`, `<`, `>`, and `"`.  Single quotes are not escaped because all
+ * generated attributes use double-quote delimiters.
+ *
+ * @param str - The raw string to escape.
+ * @returns A string safe for insertion into HTML.
+ */
+function htmlEscape(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Percent-encode each segment of a URL path while preserving the `/`
+ * separators, so that the result is safe to use as an `href` attribute value.
+ *
+ * Each segment is passed through {@link encodeURIComponent}, which encodes
+ * all characters except `A-Z a-z 0-9 - _ . ! ~ * ' ( )`.  The `/` delimiters
+ * between segments are kept as literal slashes.
+ *
+ * @param urlPath - A decoded URL path, e.g. `'/dir with spaces/readme.txt'`.
+ * @returns A percent-encoded path, e.g. `'/dir%20with%20spaces/readme.txt'`.
+ */
+function encodePath(urlPath: string): string {
+  return urlPath.split('/').map(s => encodeURIComponent(s)).join('/');
 }
 
 /**
@@ -553,10 +589,12 @@ function writeIndexOf(
     }
 
     // ── Build HTML ───────────────────────────────────────────────────────────
+    // urlPath comes from req.path (user-controlled) and file names come from
+    // the filesystem — both must be escaped before insertion into HTML.
     let html = '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">\n';
     html += '<html>\n';
-    html += `<head><title>Index of ${urlPath}</title></head>\n`;
-    html += `<body><h1>Index of ${urlPath}</h1><table>\n`;
+    html += `<head><title>Index of ${htmlEscape(urlPath)}</title></head>\n`;
+    html += `<body><h1>Index of ${htmlEscape(urlPath)}</h1><table>\n`;
     html += '<tr>'
       + '<th valign="top"><img src="/icons/blank.gif" alt="[ICO]"></th>'
       + `<th>${thLink('N', 'Name')}</th>`
@@ -569,23 +607,27 @@ function writeIndexOf(
     if (parentUrlPath)
       html += `<tr>`
         + `<td valign="top"><img src="/icons/back.gif" alt="[PARENTDIR]"></td>`
-        + `<td><a href="${parentUrlPath}">Parent Directory</a></td>`
+        + `<td><a href="${encodePath(parentUrlPath)}">Parent Directory</a></td>`
         + `<td>&nbsp;</td><td align="right">  - </td><td>&nbsp;</td>`
         + `</tr>\n`;
 
     for (const { file, stat, isDir } of entries) {
-      const fullPath  = nodePath.join(directoryPath, file);
-      const mimeType  = mime.lookup(fullPath, '');
-      const mediaType = mimeType.includes('/') ? mimeType.split('/')[0] : '';
-      const alt       = isDir ? 'folder' : (mediaType || 'unknown');
-      const icon      = `/icons/${alt}.gif`;
-      const name      = file + (isDir ? '/' : '');
-      const modified  = stat.mtime.toUTCString();
-      const size      = isDir ? '-' : String(stat.size);
+      const fullPath   = nodePath.join(directoryPath, file);
+      const mimeType   = mime.lookup(fullPath, '');
+      const mediaType  = mimeType.includes('/') ? mimeType.split('/')[0] : '';
+      const alt        = isDir ? 'folder' : (mediaType || 'unknown');
+      const icon       = `/icons/${alt}.gif`;
+      const name       = file + (isDir ? '/' : '');
+      // href uses percent-encoding (safe for URL context); display text uses
+      // HTML-escaping (safe for HTML text content).
+      const hrefName   = encodeURIComponent(file) + (isDir ? '/' : '');
+      const displayName = htmlEscape(name);
+      const modified   = stat.mtime.toUTCString();
+      const size       = isDir ? '-' : String(stat.size);
 
       html += `<tr>`
         + `<td valign="top"><img src="${icon}" alt="[${alt.toUpperCase()}]"></td>`
-        + `<td><a href="${name}">${name}</a></td>`
+        + `<td><a href="${hrefName}">${displayName}</a></td>`
         + `<td align="right">${modified}</td>`
         + `<td align="right">${size}</td>`
         + `<td>&nbsp;</td>`
@@ -826,7 +868,14 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
     }
 
     // Decode the current path (after any prefix stripping by parent routers).
-    const originalUrl = decodeURIComponent(req.path ?? req.url ?? '/');
+    // Malformed percent-sequences (e.g. %zz, trailing %) are rejected immediately
+    // because they cannot represent a valid file path and may indicate an attack.
+    let originalUrl: string;
+    try {
+      originalUrl = decodeURIComponent(req.path ?? req.url ?? '/');
+    } catch {
+      return HTTP.BAD_REQUEST(res, opts);
+    }
     let pathname = originalUrl;
 
     // When the URL ends without a trailing slash but the bare mount point was
@@ -840,6 +889,12 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
 
     // Resolve to an absolute filesystem path.
     pathname = nodePath.resolve(nodePath.normalize(`${opts.root}/${pathname}`));
+
+    // Defense-in-depth: verify the resolved path remains inside opts.root.
+    // This catches edge cases that bypass UP_PATH_REGEXP — e.g. OS-level
+    // symlinks, or unusual Unicode normalisation on certain file systems.
+    if (pathname !== opts.root && !pathname.startsWith(opts.root + nodePath.sep))
+      return HTTP.FORBIDDEN(res, opts);
 
     // Dot-file handling.
     if (opts.dotfiles !== 'allow' && pathname.includes('/.')) {

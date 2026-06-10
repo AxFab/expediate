@@ -20,11 +20,11 @@ Success criteria:
 
 Tasks:
 
-- [ ] Fix method route endpoint matching so `get('/users')` does not match
+- [x] Fix method route endpoint matching so `get('/users')` does not match
   `/users/42`, while `use('/users')` still acts as a prefix mount.
-- [ ] Catch malformed percent encodings in `serveStatic()` and return a
+- [x] Catch malformed percent encodings in `serveStatic()` and return a
   controlled `400 Bad Request`.
-- [ ] Escape text and attributes in `writeIndexOf()` directory listings.
+- [x] Escape text and attributes in `writeIndexOf()` directory listings.
 - [ ] Fix or remove the `json()` middleware override of `res.json()` so JSON
   responses always set `Content-Type`.
 - [ ] Reset or reject global/sticky user RegExp route patterns.
