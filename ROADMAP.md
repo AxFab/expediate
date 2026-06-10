@@ -25,11 +25,11 @@ Tasks:
 - [x] Catch malformed percent encodings in `serveStatic()` and return a
   controlled `400 Bad Request`.
 - [x] Escape text and attributes in `writeIndexOf()` directory listings.
-- [ ] Fix or remove the `json()` middleware override of `res.json()` so JSON
+- [x] Fix or remove the `json()` middleware override of `res.json()` so JSON
   responses always set `Content-Type`.
-- [ ] Decide body parser content-type policy: Express-style pass-through or
+- [x] Decide body parser content-type policy: Express-style pass-through or
   strict `415`; update tests and docs accordingly.
-- [ ] Reset or reject global/sticky user RegExp route patterns.
+- [x] Reset or reject global/sticky user RegExp route patterns.
 - [ ] Add `test:coverage` using Node's native test coverage.
 
 ## Milestone 2 - Express Migration Ergonomics
@@ -45,13 +45,14 @@ Success criteria:
 Tasks:
 
 - [ ] Add `req.query` alias to `req.queries.url`.
-- [ ] Add `req.get()` / `req.header()`.
 - [ ] Add `req.hostname`, `req.protocol`, `req.secure`, and `req.ips`.
 - [ ] Track `req.baseUrl` through nested routers.
-- [ ] Add `res.set()` / `res.header()` and `res.get()`.
 - [ ] Add `res.append()`, `res.vary()`, `res.location()`, `res.clearCookie()`,
   `res.sendStatus()`, `res.attachment()`, and `res.locals`.
 - [ ] Validate `res.status()` codes as integers in the `100..999` range.
+
+- [ ] Add `req.get()` / `req.header()`.
+- [ ] Add `res.set()` / `res.header()` and `res.get()`.
 - [ ] Add `router.route(path).get(...).post(...)`.
 - [ ] Decide and document `HEAD`, `OPTIONS`, and automatic `405` behavior.
 

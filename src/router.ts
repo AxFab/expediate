@@ -849,6 +849,17 @@ function buildRouteLayer(
   if (typeof middleware !== 'function')
     throw new TypeError('Incorrect middleware type: expected a function');
 
+  // Reject RegExp patterns with the global (g) or sticky (y) flag.
+  // Both flags make RegExp.exec()/test() stateful: lastIndex advances after
+  // each match, so the same regex object alternates match/no-match across
+  // requests, causing intermittent 404s that are nearly impossible to debug.
+  // Express 4 silently allowed this (a known footgun); we reject it early.
+  if (path instanceof RegExp && (path.global || path.sticky))
+    throw new TypeError(
+      `Route RegExp /${path.source}/${path.flags} must not use the g (global) or y (sticky) flag — ` +
+      'these flags make exec() stateful and cause intermittent routing failures.',
+    );
+
   return { method, path, regex: compilePattern(path, !stripPath), stripPath, middleware };
 }
 

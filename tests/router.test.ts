@@ -492,6 +492,43 @@ describe('RegExp paths', () => {
     assert.equal(p.year,  '2024');
     assert.equal(p.month, '03');
   });
+
+  // Global and sticky flags make RegExp.exec() stateful (lastIndex advances
+  // after each match), so the same pattern object alternates match/no-match
+  // across requests — a silent, hard-to-debug routing failure.
+  it('throws TypeError when registering a global (/g) RegExp', () => {
+    assert.throws(
+      () => createRouter().get(/\/users/g, (_req, res) => res.end()),
+      (e: unknown) => e instanceof TypeError,
+    );
+  });
+
+  it('throws TypeError when registering a sticky (/y) RegExp', () => {
+    assert.throws(
+      () => createRouter().get(/\/users/y, (_req, res) => res.end()),
+      (e: unknown) => e instanceof TypeError,
+    );
+  });
+
+  it('throws TypeError for global flag on use() as well', () => {
+    assert.throws(
+      () => createRouter().use(/\/api/g, (_req, _res, next) => next()),
+      (e: unknown) => e instanceof TypeError,
+    );
+  });
+
+  it('accepts a plain RegExp without g or y flag', () => {
+    // Sanity check: non-stateful RegExp must still be accepted.
+    assert.doesNotThrow(
+      () => createRouter().get(/^\/users\/\d+$/, (_req, res) => res.end()),
+    );
+  });
+
+  it('accepts a case-insensitive (/i) RegExp', () => {
+    assert.doesNotThrow(
+      () => createRouter().get(/^\/users/i, (_req, res) => res.end()),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
