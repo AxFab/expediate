@@ -28,7 +28,7 @@ import * as http2  from 'http2';
 import * as net    from 'net';
 import * as path   from 'path';
 import { BodyOptions, FormPart, parseMultipartBody, extractCharset, readReqBody } from './misc.js';
-import { serveFile } from './static.js';
+import { mime, serveFile } from './static.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -142,6 +142,44 @@ interface RouterRequest extends http.IncomingMessage {
    *
    */
   body?: any;
+
+  /**
+   * Alias for `req.queries.url` — the parsed URL query-string parameters.
+   * Mirrors the Express `req.query` property.
+   */
+  query: Record<string, string | string[]>;
+
+  /**
+   * The hostname derived from the `Host` (or `X-Forwarded-Host` when
+   * `trustProxy` is enabled) header, with any port suffix stripped.
+   */
+  hostname: string;
+
+  /**
+   * The request protocol: `'https'` when the connection is encrypted (TLS or
+   * `X-Forwarded-Proto: https` with `trustProxy` enabled), `'http'` otherwise.
+   */
+  protocol: string;
+
+  /**
+   * `true` when `req.protocol === 'https'`.
+   */
+  secure: boolean;
+
+  /**
+   * Array of IP addresses from the `X-Forwarded-For` header (when
+   * `trustProxy` is enabled), ordered from the originating client to the
+   * nearest proxy.  Empty array when the header is absent or `trustProxy` is
+   * disabled.
+   */
+  ips: string[];
+
+  /**
+   * The URL prefix matched by the nearest `use()` mount point.  Mirrors the
+   * Express `req.baseUrl` property.  Starts as `''` and accumulates each
+   * stripped prefix as the request traverses nested `use()` routers.
+   */
+  baseUrl: string;
 
   /**
    * Read and parse the request body as JSON.
@@ -273,6 +311,56 @@ interface RouterResponse extends http.ServerResponse {
    * ```
    */
   etag(value: string, strong?: boolean): this;
+
+  /**
+   * Append a value to a response header, creating it if it does not exist.
+   * When the header already exists, the new value is appended (comma-joined
+   * for most headers; `Set-Cookie` accumulates as an array).
+   * Returns `this` for chaining.
+   */
+  append(field: string, value: string | string[]): this;
+
+  /**
+   * Add the given field(s) to the `Vary` response header.
+   * Existing values are preserved; duplicates are skipped.
+   * Returns `this` for chaining.
+   */
+  vary(field: string | string[]): this;
+
+  /**
+   * Set the `Location` response header.
+   * Returns `this` for chaining.
+   */
+  location(url: string): this;
+
+  /**
+   * Clear a cookie by name by setting its `Max-Age` to `0` and `Expires` to
+   * the Unix epoch.  Any `path` or `domain` options passed must match those
+   * used when the cookie was originally set.
+   * Returns `this` for chaining.
+   */
+  clearCookie(name: string, options?: CookieOptions): this;
+
+  /**
+   * Send a response whose body is the standard HTTP status message for `code`.
+   * Sets the status code, `Content-Type: text/plain`, and ends the response.
+   */
+  sendStatus(code: number): void;
+
+  /**
+   * Set `Content-Disposition: attachment` with an optional filename.
+   * When `filename` is provided, the `Content-Type` header is also set based
+   * on the file extension.
+   * Returns `this` for chaining.
+   */
+  attachment(filename?: string): this;
+
+  /**
+   * A plain object for storing response-scoped data shared between middleware
+   * and route handlers within a single request/response cycle.
+   * Mirrors the Express `res.locals` property.
+   */
+  locals: Record<string, unknown>;
 }
 
 /** Options accepted by `res.cookie()`. */
@@ -1028,17 +1116,30 @@ function updateHttpObjects(
 
   rReq.queries = {};
 
-  // Resolve the client IP address.
+  // Resolve the client IP address and proxy-related fields.
   // When trustProxy is true the leftmost value in X-Forwarded-For is used
   // (the originating client behind the proxy chain).  Otherwise we read the
   // raw TCP remote address directly from the socket, which cannot be spoofed.
   if (trustProxy) {
     const xff = req.headers['x-forwarded-for'];
-    const first = Array.isArray(xff) ? xff[0] : xff;
-    rReq.ip = (first ? first.split(',')[0].trim() : req.socket?.remoteAddress) ?? '';
+    const xffStr = Array.isArray(xff) ? xff.join(',') : (xff ?? '');
+    rReq.ips = xffStr ? xffStr.split(',').map(s => s.trim()) : [];
+    rReq.ip  = rReq.ips[0] ?? req.socket?.remoteAddress ?? '';
+
+    const xProto = req.headers['x-forwarded-proto'];
+    rReq.protocol = (Array.isArray(xProto) ? xProto[0] : xProto)?.split(',')[0].trim() ?? 'http';
+
+    const xHost = req.headers['x-forwarded-host'];
+    const hostHeader = (Array.isArray(xHost) ? xHost[0] : xHost) ?? req.headers.host ?? '';
+    rReq.hostname = hostHeader.replace(/:\d+$/, '');
   } else {
-    rReq.ip = req.socket?.remoteAddress ?? '';
+    rReq.ip       = req.socket?.remoteAddress ?? '';
+    rReq.ips      = [];
+    rReq.protocol = (req.socket as any)?.encrypted ? 'https' : 'http';
+    rReq.hostname = (req.headers.host ?? '').replace(/:\d+$/, '');
   }
+  rReq.secure  = rReq.protocol === 'https';
+  rReq.baseUrl = rReq.baseUrl ?? '';
 
   const qry = new URL(`http://${req.headers.host}${req.url}`);
   rReq.originalUrl = req.url!;
@@ -1064,6 +1165,7 @@ function updateHttpObjects(
     flatParams[key] = Array.isArray(value) ? value[0] : value;
   }
   rReq.params = flatParams;
+  rReq.query  = urlParams;
 
   // Parse cookies.
   if (rReq.cookies == null) {
@@ -1202,7 +1304,10 @@ function updateHttpObjects(
     if (opts.maxAge != null) {
       const maxAgeMs  = opts.maxAge;
       const maxAgeSec = Math.floor(maxAgeMs / 1000);
-      opts.expires    = new Date(Date.now() + maxAgeMs);
+      // Only derive Expires from maxAge when maxAge > 0; a zero maxAge is used
+      // for clearing cookies and the caller may have already set opts.expires
+      // to the epoch — do not overwrite it.
+      if (maxAgeMs > 0) opts.expires = new Date(Date.now() + maxAgeMs);
       txt += `; Max-Age=${maxAgeSec}`;
     }
 
@@ -1251,6 +1356,98 @@ function updateHttpObjects(
   rRes.etag = (value: string, strong = false): typeof rRes => {
     res.setHeader('ETag', strong ? `"${value}"` : `W/"${value}"`);
     return rRes;
+  };
+
+  rRes.locals = {};
+
+  rRes.append = (field: string, value: string | string[]): typeof rRes => {
+    const existing = res.getHeader(field);
+    if (existing == null) {
+      res.setHeader(field, value);
+    } else if (field.toLowerCase() === 'set-cookie') {
+      // Set-Cookie must accumulate as an array (multiple values not comma-joinable).
+      const prev = Array.isArray(existing) ? existing : [String(existing)];
+      const next = Array.isArray(value) ? value : [value];
+      res.setHeader(field, [...prev, ...next]);
+    } else {
+      const prev = Array.isArray(existing) ? existing.join(', ') : String(existing);
+      const added = Array.isArray(value) ? value.join(', ') : value;
+      res.setHeader(field, `${prev}, ${added}`);
+    }
+    return rRes;
+  };
+
+  rRes.vary = (field: string | string[]): typeof rRes => {
+    const fields = Array.isArray(field) ? field : [field];
+    const existing = res.getHeader('Vary');
+    const current: string[] = existing
+      ? (Array.isArray(existing) ? existing : [String(existing)])
+          .join(', ')
+          .split(',')
+          .map(s => s.trim().toLowerCase())
+      : [];
+    for (const f of fields) {
+      if (!current.includes(f.toLowerCase())) {
+        current.push(f.toLowerCase());
+      }
+    }
+    res.setHeader('Vary', current.join(', '));
+    return rRes;
+  };
+
+  rRes.location = (url: string): typeof rRes => {
+    res.setHeader('Location', url);
+    return rRes;
+  };
+
+  rRes.clearCookie = (name: string, options?: CookieOptions): typeof rRes => {
+    const opts: CookieOptions = { ...options, expires: new Date(0), maxAge: 0 };
+    // Remove signed flag — clearing does not need signing.
+    delete opts.signed;
+    rRes.cookie(name, '', opts);
+    return rRes;
+  };
+
+  rRes.sendStatus = (code: number): void => {
+    const messages: Record<number, string> = {
+      100: 'Continue', 101: 'Switching Protocols', 102: 'Processing',
+      200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
+      206: 'Partial Content', 207: 'Multi-Status',
+      300: 'Multiple Choices', 301: 'Moved Permanently', 302: 'Found',
+      303: 'See Other', 304: 'Not Modified', 307: 'Temporary Redirect',
+      308: 'Permanent Redirect',
+      400: 'Bad Request', 401: 'Unauthorized', 402: 'Payment Required',
+      403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
+      406: 'Not Acceptable', 408: 'Request Timeout', 409: 'Conflict',
+      410: 'Gone', 411: 'Length Required', 413: 'Payload Too Large',
+      415: 'Unsupported Media Type', 422: 'Unprocessable Entity',
+      429: 'Too Many Requests',
+      500: 'Internal Server Error', 501: 'Not Implemented',
+      502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout',
+    };
+    res.setHeader('Content-Type', 'text/plain');
+    res.statusCode = code;
+    res.end(messages[code] ?? String(code));
+  };
+
+  rRes.attachment = (filename?: string): typeof rRes => {
+    if (filename) {
+      const mimeType = mime.lookup(filename, 'application/octet-stream');
+      res.setHeader('Content-Type', mimeType);
+      const safeName = path.basename(filename).replace(/"/g, '\\"');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    } else {
+      res.setHeader('Content-Disposition', 'attachment');
+    }
+    return rRes;
+  };
+
+  // Wrap status() to validate code is an integer in 100–999.
+  const _statusOrig = rRes.status.bind(rRes);
+  rRes.status = (code: number, headers?: StringMap): typeof rRes => {
+    if (!Number.isInteger(code) || code < 100 || code > 999)
+      throw new RangeError(`Invalid status code: ${code}. Must be an integer between 100 and 999.`);
+    return _statusOrig(code, headers);
   };
 }
 
@@ -1504,10 +1701,15 @@ function createRouter(
 
         if (matchRouteLayer(layer, req, req.path)) {
           if (layer.stripPath) {
-            // For prefix layers (use), restore req.path after the sub-router
-            // calls done() so that subsequent sibling layers see the original path.
+            // For prefix layers (use), restore req.path and req.baseUrl after
+            // the sub-router calls done() so subsequent sibling layers see the
+            // original values.
+            const baseUrlBefore = req.baseUrl;
+            const strippedPrefix = pathBefore.slice(0, pathBefore.length - req.path.length);
+            req.baseUrl = baseUrlBefore + strippedPrefix;
             invoke(layer.middleware, () => {
-              req.path = pathBefore;
+              req.path    = pathBefore;
+              req.baseUrl = baseUrlBefore;
               next();
             });
             return;
