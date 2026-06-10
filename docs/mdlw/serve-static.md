@@ -62,7 +62,15 @@ ETags use the format `W/"<size_hex>-<mtime_hex>"`. The middleware evaluates:
 
 ## Path traversal protection
 
-Any request path containing `..` (in any position, including with back-slashes) is rejected with **403 Forbidden** before reaching the filesystem.
+Any request path containing `..` (in any position, including with back-slashes) is rejected with **403 Forbidden** before reaching the filesystem. After `path.resolve()`, the result is also checked to confirm it falls within the declared `root`; anything that resolves outside returns **403**.
+
+## Malformed percent-encoding
+
+Request paths with invalid percent-encoded characters (e.g. `/%zz`, `/%a`) are rejected with **400 Bad Request** rather than causing an internal error.
+
+## Directory listing security
+
+When `indexOf: true`, all user-controlled content interpolated into the HTML listing (URL path, parent directory path, filenames) is HTML-escaped before rendering, and link `href` values use `encodeURIComponent`. This prevents XSS when a directory contains files with HTML-significant characters.
 
 ## Method filtering
 
@@ -73,7 +81,7 @@ Only `GET` and `HEAD` are served. Other methods receive **405 Method Not Allowed
 On each request the middleware:
 
 1. Rejects non-GET/HEAD methods (fallthrough or 405).
-2. Decodes and normalises the URL path, then applies the traversal guard.
+2. Decodes the URL path — returns **400** on malformed percent-encoding — then applies the traversal guard and root containment check.
 3. Applies dot-file rules.
 4. Calls `fs.stat()` on the resolved absolute filesystem path.
 5. For directories, redirects to `index.html` (or renders a listing when `indexOf: true`).
