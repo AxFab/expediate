@@ -27,9 +27,9 @@ Tasks:
 - [x] Escape text and attributes in `writeIndexOf()` directory listings.
 - [ ] Fix or remove the `json()` middleware override of `res.json()` so JSON
   responses always set `Content-Type`.
-- [ ] Reset or reject global/sticky user RegExp route patterns.
 - [ ] Decide body parser content-type policy: Express-style pass-through or
   strict `415`; update tests and docs accordingly.
+- [ ] Reset or reject global/sticky user RegExp route patterns.
 - [ ] Add `test:coverage` using Node's native test coverage.
 
 ## Milestone 2 - Express Migration Ergonomics

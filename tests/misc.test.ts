@@ -160,14 +160,16 @@ describe('json() middleware', () => {
     assert.equal(r.body, 'next() called');
   });
 
-  it('returns 415 when Content-Type is not application/json', async () => {
+  it('calls next() when Content-Type is not application/json', async () => {
+    // Express-compatible: mismatched content-type passes through so the next
+    // parser in the stack can handle the request.
     const mw   = json();
     const body = Buffer.from('hello');
     const r    = await request(mw, {
       body,
       headers: { 'content-type': 'text/plain' },
     });
-    assert.equal(r.statusCode, 415);
+    assert.equal(r.body, 'next() called');
   });
 
   it('returns 413 when body exceeds the limit', async () => {
@@ -261,7 +263,9 @@ describe('json() middleware', () => {
     assert.equal(r.statusCode, 415);
   });
 
-  it('attaches res.json() helper', async () => {
+  it('res.json() sets Content-Type: application/json and serialises data', async () => {
+    // res.json() is provided by the router (updateHttpObjects), not by the
+    // json() middleware.  Verify it sets the correct Content-Type header.
     const mw = json();
     const router = createRouter();
     router.use('/', mw as any);
@@ -273,6 +277,7 @@ describe('json() middleware', () => {
       headers: { 'content-type': 'application/json' },
     });
     assert.equal(r.statusCode, 200);
+    assert.equal(r.headers['content-type'], 'application/json');
     assert.deepEqual(JSON.parse(r.body), { ok: true });
   });
 
@@ -397,13 +402,14 @@ describe('formData() middleware', () => {
     assert.ok(parts[0].content.equals(binaryData), 'Binary content should be preserved');
   });
 
-  it('returns 415 when Content-Type is not multipart/form-data', async () => {
+  it('calls next() when Content-Type is not multipart/form-data', async () => {
+    // Express-compatible: mismatched content-type passes through.
     const mw = formData();
     const r  = await request(mw, {
       body:    Buffer.from('hello'),
       headers: { 'content-type': 'text/plain' },
     });
-    assert.equal(r.statusCode, 415);
+    assert.equal(r.body, 'next() called');
   });
 
   it('returns 413 when body exceeds limit', async () => {
@@ -1122,13 +1128,14 @@ describe('formEncoded() middleware (FEAT-01)', () => {
     assert.equal(r.body, 'next() called');
   });
 
-  it('returns 415 when Content-Type is not form-urlencoded', async () => {
+  it('calls next() when Content-Type is not form-urlencoded', async () => {
+    // Express-compatible: mismatched content-type passes through.
     const mw = formEncoded();
     const r  = await request(mw, {
       body:    Buffer.from('{"key":"val"}'),
       headers: { 'content-type': 'application/json' },
     });
-    assert.equal(r.statusCode, 415);
+    assert.equal(r.body, 'next() called');
   });
 
   it('returns 413 when body exceeds the limit', async () => {

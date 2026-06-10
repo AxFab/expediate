@@ -292,9 +292,12 @@ function readBody(
     (encoding ? DECOMPRESS_ALGO[encoding] : undefined) ?? ((d: Buffer, c: zlib.CompressCallback) => c(null, d as any));
 
   // Content-Type validation.
+  // When a specific mimetype is expected and the request carries a different one,
+  // pass through to the next middleware (Express-compatible composable behaviour).
+  // Returning 415 here would break parser stacking: json() + formEncoded() + …
   const contentType = (req.headers['content-type'] as string) ?? '';
   if (mimetype && contentType.split(';')[0].trim() !== mimetype)
-    return void res.status(415).send('Unsupported Media Type: Wrong Content-Type');
+    return next();
 
   // Stream collection.
   let data: Buffer | null = Buffer.alloc(0);
@@ -640,22 +643,17 @@ const BODY_READERS: Record<
 // ---------------------------------------------------------------------------
 
 /**
- * Middleware factory that parses a `application/json` request body and
+ * Middleware factory that parses an `application/json` request body and
  * assigns the parsed value to `req.body`.
- *
- * Also attaches a `res.json(data)` helper to the response object so that
- * handlers can send JSON responses conveniently:
- * ```ts
- * res.json({ ok: true });
- * ```
  *
  * Behaviour:
  * - Requests without a body (`Content-Length: 0` or absent) are passed
  *   through to `next()` without touching `req.body`.
+ * - Requests whose `Content-Type` is not `application/json` are also passed
+ *   through to `next()` unchanged, allowing other parsers to handle them
+ *   (Express-compatible composable behaviour).
  * - Bodies larger than `opts.limit` receive **413 Content Too Large**.
  * - Bodies with an unsupported `Content-Encoding` receive
- *   **415 Unsupported Media Type**.
- * - Bodies whose `Content-Type` is not `application/json` receive
  *   **415 Unsupported Media Type**.
  * - Parse errors receive **500 Internal Server Error**.
  *
@@ -672,11 +670,6 @@ export function json(opts?: BodyOptions): Middleware {
   };
 
   return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-    // Attach a JSON response helper so handlers can call res.json(data).
-    (res as any).json = (data: unknown): void => {
-      res.write(JSON.stringify(data));
-      res.end();
-    };
     readBody(req, res, resolved, 'application/json', next, (contentType, body) => {
       readBodyAsJson(req, res, next, resolved, contentType, body);
     });
@@ -727,8 +720,8 @@ export function formData(opts?: BodyOptions): Middleware {
  * Behaviour:
  * - Requests without a body are passed through to `next()`.
  * - Bodies larger than `opts.limit` receive **413 Content Too Large**.
- * - Bodies whose `Content-Type` is not `application/x-www-form-urlencoded`
- *   receive **415 Unsupported Media Type**.
+ * - Requests whose `Content-Type` is not `application/x-www-form-urlencoded`
+ *   are passed through to `next()` unchanged (Express-compatible composable behaviour).
  * - Parse errors receive **400 Bad Request**.
  *
  * @param opts - Optional configuration (see {@link BodyOptions}).
