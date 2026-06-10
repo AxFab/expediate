@@ -668,7 +668,7 @@ function isGlobPattern(pattern: string): boolean {
  * compileGlob('/api/*')    .test('/api/users/123');   // false
  * ```
  */
-function compileGlob(glob: string): RegExp {
+function compileGlob(glob: string, exact = false): RegExp {
   // Escape all regex special characters, leaving our wildcard characters intact.
   let src = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&');
 
@@ -679,7 +679,7 @@ function compileGlob(glob: string): RegExp {
     .replace(/\?/g, '[^/]')              // single-character wildcard
     .replace(/\x00GLOBSTAR\x00/g, '.*'); // cross-segment wildcard
 
-  return new RegExp('^' + src);
+  return new RegExp('^' + src + (exact ? '$' : ''));
 }
 
 /**
@@ -749,7 +749,7 @@ function extractInlinePattern(str: string, openIdx: number): { pattern: string; 
  * re.exec('/users/7')?.groups; // { id: '7' }
  * ```
  */
-function compilePlainPath(path: string): RegExp {
+function compilePlainPath(path: string, exact = false): RegExp {
   const segments = path.split('/').filter((s) => s.length > 0);
   const src = segments
     .map((seg) => {
@@ -788,7 +788,9 @@ function compilePlainPath(path: string): RegExp {
 
   // Validate and return — surface any regex syntax errors as SyntaxError.
   try {
-    return new RegExp('^/?' + src + '(?=/|$)');
+    return new RegExp(exact
+      ? '^/?' + src + (src ? '/?' : '') + '$'
+      : '^/?' + src + '(?=/|$)');
   } catch (e) {
     throw new SyntaxError(
       `Invalid inline regex constraint in path '${path}': ${(e as Error).message}`,
@@ -809,10 +811,10 @@ function compilePlainPath(path: string): RegExp {
  * @param path - The raw path pattern supplied by the caller.
  * @returns A `RegExp` suitable for use in `matchRouteLayer`.
  */
-function compilePattern(path: string | RegExp): RegExp {
+function compilePattern(path: string | RegExp, exact = false): RegExp {
   if (path instanceof RegExp) return path;
-  if (isGlobPattern(path))    return compileGlob(path);
-  return compilePlainPath(path);
+  if (isGlobPattern(path))    return compileGlob(path, exact);
+  return compilePlainPath(path, exact);
 }
 
 // ---------------------------------------------------------------------------
@@ -847,7 +849,7 @@ function buildRouteLayer(
   if (typeof middleware !== 'function')
     throw new TypeError('Incorrect middleware type: expected a function');
 
-  return { method, path, regex: compilePattern(path), stripPath, middleware };
+  return { method, path, regex: compilePattern(path, !stripPath), stripPath, middleware };
 }
 
 // ---------------------------------------------------------------------------

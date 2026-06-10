@@ -112,6 +112,16 @@ describe('compilePlainPath', () => {
     assert.equal(r.statusCode, 404);
   });
 
+  it('method routes match the endpoint, not a longer path prefix', async () => {
+    const router = createRouter();
+    let hit = false;
+    router.get('/users', (_req, res) => { hit = true; res.end('ok'); });
+
+    const r = await makeRequest(router, { url: '/users/42' });
+    assert.ok(!hit, 'GET /users must not handle /users/42');
+    assert.equal(r.statusCode, 404);
+  });
+
   it('captures a single :param', async () => {
     const router = createRouter();
     let captured = '';
@@ -339,14 +349,13 @@ describe('compileGlob', () => {
     assert.ok(hit);
   });
 
-  it('* matches a prefix — /api/* matches /api/users/123 as a prefix', async () => {
-    // Glob regexes are prefix-anchored. /api/* compiles to ^/api/[^/]* which
-    // matches the prefix /api/users in /api/users/123 (no $ anchor).
+  it('* on a method route does not match a longer path prefix', async () => {
     const router = createRouter();
     let hit = false;
     router.get('/api/*', (_req, res) => { hit = true; res.end('ok'); });
-    await makeRequest(router, { url: '/api/users/123' });
-    assert.ok(hit, '/api/* should match /api/users/123 as a prefix');
+    const r = await makeRequest(router, { url: '/api/users/123' });
+    assert.ok(!hit, '/api/* should not handle /api/users/123 on a method route');
+    assert.equal(r.statusCode, 404);
   });
 
   it('** crosses slash boundaries', async () => {
@@ -527,6 +536,14 @@ describe('HTTP method filtering', () => {
       (r.headers['allow'] as string).includes('GET'),
       `Expected GET in Allow: ${r.headers['allow']}`,
     );
+  });
+
+  it('does not return 405 when only a longer path prefix matches', async () => {
+    const router = createRouter();
+    router.get('/resource', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'POST', url: '/resource/extra' });
+    assert.equal(r.statusCode, 404);
   });
 
   it('Allow header on 405 lists all registered methods for that path', async () => {
