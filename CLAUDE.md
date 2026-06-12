@@ -102,12 +102,14 @@ Test files in `tests/` use `tsx` at runtime and are never compiled.
 | `middleware.ts`   | `compress`, `requestId`, `rateLimit`, `cacheControl`, `csrf`, `securityHeaders`, `conditionalGet`, types: `CompressOptions`, `RequestIdOptions`, `RateLimitOptions`, `CacheControlOptions`, `CsrfOptions`, `SecurityHeadersOptions` |
 | `jwt-auth.ts`     | `createJwtPlugin`, `createMapTokenStore`, types: `JwtPlugin`, `JwtConfig`, `TokenStore`, `RefreshTokenRecord` |
 | `git.ts`          | `gitHandler`, `gitCreate`, types: `GitHandlerOptions`                      |
-| `apis.ts`         | `apiBuilder`, types: `ApiError`, `ServiceMethod`, `ServiceInstance`, `ServiceMethods`, `RouteMap`, `ServiceDefinition`, `ApiRouter`, `ApiRouterExtensions` |
+| `apis.ts`         | `apiBuilder`, `defineController`, types: `ApiError`, `ApiContext`, `ServiceMethod`, `ServiceInstance`, `ServiceMethods`, `RouteMap`, `ServiceDefinition`, `ControllerDefinition`, `Guard`, `AuthBinding`, `ValidateOptions`, `ApiRouter`, `ApiRouterExtensions` |
 | `openapi.ts`      | `describe`, `openApiSpec`, `serializeSpec`, `DESCRIBE_META`, types: `JsonSchema`, `ParameterObject`, `RequestBodyObject`, `ResponseObject`, `OperationMeta`, `OpenApiServiceMeta`, `SpecOptions`, `SpecFormat`, `OpenApiDocument` |
 
 Note: `cors` is exported from `misc` but **not documented in the README**. `extractCharset`
 and `readReqBody` are exported from `misc.ts` directly but not re-exported through `index.ts` —
-they are implementation details also used by `router.ts`.
+they are implementation details also used by `router.ts`. Similarly, `collectRoutes` and
+`validateSchema` are exported from `apis.ts` (consumed by `openapi.ts` and the test suite
+respectively) but are not part of the public package API.
 
 ---
 
@@ -449,10 +451,20 @@ object that combines state, helper methods, and HTTP route handlers.
 
 ```ts
 interface ServiceDefinition<TInstance> {
+  // Instance lifecycle (API-wide, shared by all controllers)
   scope?:   (req) => string | null;  // scoping strategy
-  data?:    (key) => TInstance;      // factory for initial state
+  data?:    (key) => Partial<TInstance>; // factory for initial state
   setup?:   (this: TInstance) => void | Promise<void>;
   methods?: ServiceMethods<TInstance>;
+
+  // v2 — composition, guards, auth, validation
+  controllers?: ControllerDefinition<TInstance>[];  // merged sub-controllers
+  guards?:      Guard[];                            // run before every handler
+  auth?:        AuthBinding;                        // authenticate + check + spec scheme
+  validate?:    boolean | ValidateOptions;          // enforce requestBody schemas
+  schemas?:     Record<string, JsonSchema>;         // shared validator/spec components
+
+  // Root route maps — form an implicit controller with no prefix
   GET?:     RouteMap<TInstance>;
   POST?:    RouteMap<TInstance>;
   PUT?:     RouteMap<TInstance>;
@@ -469,24 +481,24 @@ interface ServiceDefinition<TInstance> {
 | Returns `string`       | **Keyed** — one instance per key, cached in `modules` |
 | Returns `null`         | **Ephemeral** — fresh instance per request, discarded |
 
-Singleton key in the cache map is `'singleton'` (literal string).
+Singleton key in the cache map is `'singleton'` (literal string). The instance
+lifecycle is API-wide: all controllers share the same instance.
 
 ### `buildModule` lifecycle
 
 1. `data(key)` — creates state object (or `{ $key: key }` if no `data`)
 2. Methods mixed in — each `service.methods[name]` is copied as a regular function with `apply(instance, args)` (NOT arrow functions — this was a past bug)
-3. `setup()` — called synchronously; if async, the Promise is NOT awaited
+3. `await setup()` — the returned Promise IS awaited. Singletons serve **503 Service not ready** until it resolves; keyed/ephemeral instances are awaited per request.
 
-The async `setup()` issue means you need a "not ready" pattern in methods:
+### `ApiContext` (handler first argument)
+
 ```ts
-setup: async function() {
-  // do async init
-  this.ready = true;
-},
-methods: {
-  throwIfNotReady() {
-    if (!this.ready) throw { status: 503, message: 'Not ready' };
-  }
+interface ApiContext<TUser = unknown, TState = Record<string, unknown>> {
+  query:  { route: Record<string, string>; url: Record<string, string | string[]> };
+  params: Record<string, string>;   // alias of query.route (same object)
+  path:   string;
+  user?:  TUser;                    // default `unknown` (v2; was `any`)
+  state:  TState;                   // guard-produced values, starts {}
 }
 ```
 
@@ -503,9 +515,44 @@ methods: {
   }
   ```
 
+### Controllers and the merge algorithm (`collectRoutes`)
+
+`ControllerDefinition` = `{ prefix?, tags?, guards?, permission?, GET?, POST?, … }`,
+declared via the `defineController()` identity helper. `collectRoutes(service)`:
+
+1. Normalises root route maps into an anonymous controller (`prefix: ''`).
+2. Rewrites each path to `joinPath(prefix, path)` (duplicate slashes collapsed;
+   `'/'` + prefix `/p/:proj/wiki` → `/p/:proj/wiki`).
+3. Concatenates everything and sorts by specificity **globally**.
+4. **Throws at build time** on a duplicate `(verb, joined path)` pair, naming
+   both declaring controllers (was silent shadowing in v1 — intended break).
+5. Records per-route provenance (`tags`, composed `guards` chain, `permission`,
+   `meta`) consumed by both the request pipeline and `openApiSpec()`.
+
+### Request pipeline (per route)
+
+```
+auth.authenticate (router mw)  →  auth.check (if route/controller permission)
+  →  body validation (if validate enabled + meta.requestBody)
+  →  guards: api → controller → route   →  handler
+```
+
+- **Guards** (`(ctx, req) => void | object | Promise<…>`): thrown `ApiError`s
+  become HTTP errors; returned objects shallow-merge into `ctx.state`.
+- **`auth.check` default**: 401 when no `ctx.user`, 403 when
+  `ctx.user.permissions` is missing any required entry (mirrors
+  `jwtPlugin.requirePermission`). Overridable for resource-scoped models.
+- **`auth.authenticate`** is registered via `api.use('/', …)` before the
+  singleton 503 guard.
+- **Validation** (`validateSchema`): JSON Schema subset — `type`, `required`,
+  `properties`, `items`, `enum`, `pattern`, `minLength`/`maxLength`,
+  `minimum`/`maximum`, `additionalProperties`, `allOf`/`anyOf`/`oneOf`, `$ref`
+  resolved against `ServiceDefinition.schemas`. Failures → 400 with
+  `{ message, fieldErrors }`; dotted paths, root errors keyed `'$'`.
+
 ### Route specificity sorting
 
-Routes within each HTTP method are sorted before registration:
+All routes (root + controllers) are sorted globally before registration:
 
 ```
 score(path) = (segment_count * 100) - (param_count * 10)
@@ -525,6 +572,19 @@ intentionally to avoid this stripping affecting route resolution in tests.)
 
 Service methods receive `body` as `(req as any).body` — a body-parsing middleware
 (`json()` etc.) must run before the route handler for `body` to be populated.
+
+### OpenAPI security output
+
+Routes with a `permission` (route- or controller-level) get
+`security: [{ bearerAuth: [] }]` plus an `x-required-permissions` vendor
+extension (name overridable via `auth.permissionsExtension`), and
+`components.securitySchemes.bearerAuth` is emitted once (from `auth.scheme`,
+default HTTP bearer/JWT). `openApiSpec()` consumes the merged `collectRoutes`
+table, so controllers produce **one** document; controller `tags` fill in
+operations that declare none. Note the module cycle: `apis.ts` imports
+`openApiSpec`/`DESCRIBE_META` from `openapi.ts`, which imports `collectRoutes`
+back from `apis.ts` — safe because only hoisted function declarations are used
+at call time.
 
 ---
 
@@ -686,11 +746,12 @@ containing `'LOST'`.
 | `router.test.ts`      | compilePlainPath (incl. inline constraints), compileGlob, RegExp, methods, chain, sub-router, URL parsing, cookies, response helpers, registerRoute errors, edge cases |
 | `misc.test.ts`        | json(), formData(), formEncoded(), parseBody(), streamFormData(), readSize (via limit), logger(), chunked transfer, strict mode |
 | `middleware.test.ts`  | compress(), requestId(), rateLimit(), cacheControl(), csrf(), securityHeaders(), conditionalGet() |
-| `apis.test.ts`        | singleton/keyed/ephemeral, buildModule, return conventions, error handling, route params, HTTP verbs, multiple routes, async setup |
+| `apis.test.ts`        | singleton/keyed/ephemeral, buildModule, return conventions, error handling, route params, HTTP verbs, multiple routes, async setup, ctx.params alias, controllers (prefix joining, global sort, duplicate throw, shared instance) |
+| `api-guards.test.ts`  | guards (ordering, ctx.state merging, ApiError translation, async), auth binding (default check 401/403, controller/route permission, custom check, authenticate auto-registration, createJwtPlugin end-to-end), validateSchema keywords, request validation HTTP pipeline (400 fieldErrors, opt-out) |
 | `static.test.ts`      | validation, basic serving, security headers, caching (304/ETag), method filter, dot-files, traversal, directory redirect, contentType, fallthrough, serveFile, sendFile, ETag stability, concurrency, writeIndexOf sorting |
 | `jwt-auth.test.ts`    | hashPassword, signToken/verifyToken (HS*, RS*, ES*), login, refresh (rotation), logout, authenticate, authorize, requireRole, requirePermission, custom config, security edge cases |
 | `git.test.ts`         | factory validation, pktLine, GET /info/refs, POST /git-upload-pack, repository callback, options (strict/timeout/gitPath), unrecognised routes |
-| `openapi.test.ts`     | describe(), openApiSpec(), serializeSpec(), YAML output, path parameters, request/response schemas |
+| `openapi.test.ts`     | describe(), openApiSpec(), serializeSpec(), YAML output, path parameters, request/response schemas, merged controller specs, security emission (bearerAuth, x-required-permissions), ServiceDefinition.schemas precedence |
 
 ### Known test quirk
 
@@ -714,6 +775,10 @@ Open items identified from source comments:
 
 3. **`gitCreate` JSDoc** (`git.ts`): The `gitCreate` function has an incomplete
    JSDoc comment (the `@param` and `@returns` tags are missing).
+
+4. **Response validation** (`apis.ts`): `validate.responses` (e.g. `'warn'` in
+   dev) was considered in the v2 design (`docs/api-builder-v2-design.md` §12.3)
+   but deliberately not implemented — only request validation exists.
 
 **Resolved items (no longer open):**
 
@@ -765,11 +830,12 @@ gitHandler(opt: GitHandlerOptions): (req, res) => void
 gitCreate(gitDirectory: string, opt: GitCreateOption): Promise<void>
 
 // API builder
-apiBuilder<TInstance>(service: ServiceDefinition<TInstance>): Router
+apiBuilder<TInstance>(service: ServiceDefinition<TInstance>): ApiRouter  // throws on duplicate routes
+defineController<TInstance>(c: ControllerDefinition<TInstance>): ControllerDefinition<TInstance>
 
 // OpenAPI
-describe<TInstance>(service: OpenApiServiceMeta<TInstance>): OpenApiServiceMeta<TInstance>
-openApiSpec(service: OpenApiServiceMeta<unknown>, opts: SpecOptions): Middleware
+describe<TInstance>(handler: ServiceMethod<TInstance>, meta: OperationMeta): ServiceMethod<TInstance>
+openApiSpec<TInstance>(service: ServiceDefinition<TInstance>, opts: SpecOptions): OpenApiDocument
 serializeSpec(doc: OpenApiDocument, format?: SpecFormat): string
 DESCRIBE_META: symbol  // metadata key used to attach OpenAPI annotations
 ```
@@ -816,17 +882,23 @@ interface RefreshTokenRecord
 
 // APIs
 interface ApiError         // { status?, message?, data? }
+interface ApiContext<TUser = unknown, TState = Record<string, unknown>>
+                           // { query, params, path, user?, state }
 interface ServiceDefinition<TInstance>
+interface ControllerDefinition<TInstance>  // { prefix?, tags?, guards?, permission?, GET?, ... }
+type Guard                 // (ctx, req) => void | object | Promise<...>
+interface AuthBinding<TUser>  // { authenticate?, check?, scheme?, permissionsExtension? }
+interface ValidateOptions  // { requests? }
 type ServiceMethod<TInstance>
 type ServiceMethods<TInstance>
 type RouteMap<TInstance>
 
 // OpenAPI
-interface OperationMeta
+interface OperationMeta    // + guards?, permission? (v2)
 interface OpenApiServiceMeta<TInstance>
-interface SpecOptions      // { title, version, format?, ... }
+interface SpecOptions      // { title, version, basePath?, schemas?, ... }
 type SpecFormat            // 'json' | 'yaml'
-interface OpenApiDocument
+interface OpenApiDocument  // components may include securitySchemes (v2)
 
 // Git
 interface GitHandlerOptions

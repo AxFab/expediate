@@ -21,7 +21,7 @@ import { describe, it } from 'node:test';
 
 import createRouter         from '../src/router.ts';
 import { json }             from '../src/misc.ts';
-import apiBuilder           from '../src/apis.ts';
+import apiBuilder, { defineController } from '../src/apis.ts';
 import type { ServiceDefinition, ApiError, ServiceInstance, ApiContext } from '../src/apis.ts';
 
 // ---------------------------------------------------------------------------
@@ -838,5 +838,148 @@ describe('Async setup() and service readiness', () => {
     const r = await request(service, { path: '/' });
     assert.equal(r.statusCode, 200);
     assert.equal(r.json<any>().ready, true, 'ephemeral instance setup should be awaited');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 11 — ctx.params alias (v2)
+// ---------------------------------------------------------------------------
+
+describe('ctx.params alias', () => {
+  it('ctx.params is a shorthand for ctx.query.route', async () => {
+    const service: ServiceDefinition = {
+      GET: {
+        '/items/:id': function (ctx: ApiContext) {
+          return { short: ctx.params.id, long: ctx.query.route.id, same: ctx.params === ctx.query.route };
+        },
+      },
+    };
+    const r = await request(service, { path: '/items/42' });
+    assert.equal(r.json<any>().short, '42');
+    assert.equal(r.json<any>().long, '42');
+    assert.equal(r.json<any>().same, true, 'params should alias the same object');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 12 — Controllers and composition (v2)
+// ---------------------------------------------------------------------------
+
+describe('Controllers and composition', () => {
+  it('controller prefix is prepended to every route', async () => {
+    const service: ServiceDefinition = {
+      controllers: [defineController({
+        prefix: '/p/:proj/wiki',
+        GET: {
+          '/pages/:slug': (ctx) => ({ proj: ctx.params.proj, slug: ctx.params.slug }),
+        },
+      })],
+    };
+    const r = await request(service, { path: '/p/demo/wiki/pages/home' });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(r.json(), { proj: 'demo', slug: 'home' });
+  });
+
+  it("a '/' route joined with a prefix maps to the prefix itself", async () => {
+    const service: ServiceDefinition = {
+      controllers: [defineController({
+        prefix: '/p/:proj/wiki',
+        GET: { '/': (ctx) => ({ proj: ctx.params.proj }) },
+      })],
+    };
+    const r = await request(service, { path: '/p/demo/wiki' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.json<any>().proj, 'demo');
+  });
+
+  it('root route maps and controllers coexist in one router', async () => {
+    const service: ServiceDefinition = {
+      GET: { '/health': () => ({ root: true }) },
+      controllers: [defineController({
+        prefix: '/api',
+        GET: { '/items': () => ({ controller: true }) },
+      })],
+    };
+    const api = apiBuilder(service);
+    const r1 = await requestRouter(api, { path: '/health' });
+    const r2 = await requestRouter(api, { path: '/api/items' });
+    assert.equal(r1.json<any>().root, true);
+    assert.equal(r2.json<any>().controller, true);
+  });
+
+  it('specificity sorting is global across controllers', async () => {
+    // Root declares the parameterised route; the controller declares a more
+    // specific literal route under the same prefix. The literal route must
+    // win even though it lives in a different controller.
+    const service: ServiceDefinition = {
+      GET: { '/items/:id': (ctx) => ({ matched: 'param', id: ctx.params.id }) },
+      controllers: [defineController({
+        prefix: '/items',
+        GET: { '/special': () => ({ matched: 'literal' }) },
+      })],
+    };
+    const api = apiBuilder(service);
+    const lit = await requestRouter(api, { path: '/items/special' });
+    const par = await requestRouter(api, { path: '/items/7' });
+    assert.equal(lit.json<any>().matched, 'literal');
+    assert.equal(par.json<any>().matched, 'param');
+  });
+
+  it('handlers in every controller share the same service instance', async () => {
+    const service: ServiceDefinition<any> = {
+      data: () => ({ count: 0 }),
+      controllers: [
+        defineController<any>({
+          prefix: '/a',
+          GET: { '/inc': function (this: any) { this.count++; return { count: this.count }; } },
+        }),
+        defineController<any>({
+          prefix: '/b',
+          GET: { '/read': function (this: any) { return { count: this.count }; } },
+        }),
+      ],
+    };
+    const api = apiBuilder(service);
+    await requestRouter(api, { path: '/a/inc' });
+    const r = await requestRouter(api, { path: '/b/read' });
+    assert.equal(r.json<any>().count, 1, 'controllers must share one instance');
+  });
+
+  it('duplicate (verb, path) across controllers throws at build time', () => {
+    const service: ServiceDefinition = {
+      controllers: [
+        defineController({ prefix: '/p/:proj', tags: ['Settings'], GET: { '/settings': () => ({}) } }),
+        defineController({ prefix: '/p/:proj', tags: ['Projects'], GET: { '/settings': () => ({}) } }),
+      ],
+    };
+    assert.throws(() => apiBuilder(service), (err: Error) => {
+      assert.ok(err.message.includes('duplicate route GET /p/:proj/settings'), err.message);
+      assert.ok(err.message.includes("'Settings'"), 'should name the first declarer');
+      assert.ok(err.message.includes("'Projects'"), 'should name the second declarer');
+      return true;
+    });
+  });
+
+  it('duplicate path between root routes and a controller throws too', () => {
+    const service: ServiceDefinition = {
+      GET: { '/items': () => ({}) },
+      controllers: [defineController({ prefix: '', GET: { '/items': () => ({}) } })],
+    };
+    assert.throws(() => apiBuilder(service), /duplicate route GET \/items/);
+  });
+
+  it('the same path on different verbs is NOT a duplicate', async () => {
+    const service: ServiceDefinition = {
+      controllers: [defineController({
+        prefix: '/items',
+        GET:  { '/': () => ({ verb: 'GET' }) },
+        POST: { '/': () => ({ verb: 'POST' }) },
+      })],
+    };
+    const api = apiBuilder(service);
+    const g = await requestRouter(api, { path: '/items' });
+    const p = await requestRouter(api, { method: 'POST', path: '/items', body: {} });
+    assert.equal(g.json<any>().verb, 'GET');
+    assert.equal(p.json<any>().verb, 'POST');
   });
 });

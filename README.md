@@ -314,7 +314,7 @@ Define REST endpoints as a controller-style service object with automatic scopin
 
 ```ts
 import { createRouter, json, apiBuilder } from 'expediate';
-import type { ServiceDefinition } from 'expediate';
+import type { ServiceDefinition, ApiContext } from 'expediate';
 
 interface State { items: string[]; }
 
@@ -322,10 +322,11 @@ const service: ServiceDefinition<State> = {
   data: () => ({ items: [] }),
 
   GET: {
-    '/items': function (this: State) { return this.items; },
+    '/items':     function (this: State) { return this.items; },
+    '/items/:id': function (this: State, ctx: ApiContext) { return this.items[+ctx.params.id]; },
   },
   POST: {
-    '/items': function (this: State, _p, body: any) {
+    '/items': function (this: State, _ctx: ApiContext, body: any) {
       this.items.push(body.name);
       return this.items;
     },
@@ -340,6 +341,40 @@ app.listen(3000);
 
 Three scoping modes: **singleton** (one global instance), **keyed** (one instance per key), **ephemeral** (new instance per request). Routes are automatically sorted by specificity so declaration order does not matter.
 
+Large APIs split into per-domain **controllers** that merge into one router and one OpenAPI document — with **guards**, a declarative **auth binding** bridged to the JWT plugin, and **runtime request validation** from declared JSON Schemas:
+
+```ts
+import { apiBuilder, defineController, describe, createJwtPlugin } from 'expediate';
+
+const jwt = createJwtPlugin({ accessTokenSecret: SECRET });
+
+const wikiController = defineController({
+  prefix: '/p/:proj/wiki',
+  tags:   ['Wiki'],
+  permission: 'wiki.read',                   // auth.check() runs for every route
+  guards: [loadProject],                     // pre-handler hooks; results land in ctx.state
+
+  GET: {
+    '/pages/:slug': describe(
+      (ctx) => wiki.readPage(ctx.params.proj, ctx.params.slug),
+      { summary: 'Read a wiki page' }),
+  },
+  PUT: {
+    '/pages/:slug': describe(
+      (ctx, body) => wiki.writePage(ctx.params.proj, ctx.params.slug, body),
+      { summary: 'Create or update a page', permission: 'wiki.write' }),
+  },
+});
+
+const api = apiBuilder({
+  auth:     { authenticate: jwt.authenticate },  // default check reads ctx.user.permissions
+  validate: true,                                // enforce declared requestBody schemas (400 + fieldErrors)
+  controllers: [wikiController /* , issuesController, … */],
+});
+```
+
+Duplicate `(verb, path)` pairs across controllers **throw at build time** instead of silently shadowing.
+
 ---
 
 ## OpenAPI spec generation
@@ -347,23 +382,24 @@ Three scoping modes: **singleton** (one global instance), **keyed** (one instanc
 → Full reference: [docs/api-builder.md#openapi-spec-generation](docs/api-builder.md#openapi-spec-generation)
 
 ```ts
-import { describe, openApiSpec } from 'expediate';
+import { apiBuilder, describe } from 'expediate';
 
-const annotatedService = describe({
-  summary: 'Items API',
+const service: ServiceDefinition<State> = {
   GET: {
-    '/items': {
-      summary:   'List items',
-      responses: { 200: { description: 'Item array' } },
-      handler:   function (this: State) { return this.items; },
-    },
+    '/items': describe(
+      function (this: State) { return this.items; },
+      { summary: 'List items', responses: { '200': { description: 'Item array' } } },
+    ),
   },
-});
+};
 
-app.use('/api', apiBuilder(annotatedService));
-app.get('/openapi.json', openApiSpec(annotatedService, { title: 'Items API', version: '1.0.0' }));
-app.get('/openapi.yaml', openApiSpec(annotatedService, { title: 'Items API', version: '1.0.0', format: 'yaml' }));
+const api = apiBuilder(service);
+app.use('/api', api);
+app.get('/openapi.json', api.specHandler({ title: 'Items API', version: '1.0.0' }));
+app.get('/openapi.yaml', api.specHandler({ title: 'Items API', version: '1.0.0' }, 'yaml'));
 ```
+
+Controllers merge into a single document. Routes carrying a `permission` automatically emit `security: [{ bearerAuth: [] }]`, an `x-required-permissions` vendor extension, and the matching `components.securitySchemes` entry.
 
 ---
 
@@ -436,6 +472,7 @@ import type {
 // API builder + OpenAPI
 import type {
   ServiceDefinition, ServiceMethod, ServiceMethods, RouteMap, ApiError,
+  ApiContext, ControllerDefinition, Guard, AuthBinding, ValidateOptions,
   OperationMeta, OpenApiServiceMeta, SpecOptions, OpenApiDocument,
 } from 'expediate';
 

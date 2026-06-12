@@ -29,6 +29,7 @@ import {
   serializeSpec,
   DESCRIBE_META,
   apiBuilder,
+  defineController,
 } from '../src/index';
 
 import type {
@@ -884,5 +885,153 @@ testDescribe('apiBuilder().specHandler() — yaml format', () => {
 
     assert.ok(contentType.includes('application/json'), `got: ${contentType}`);
     server.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Controllers — merged spec (v2)
+// ---------------------------------------------------------------------------
+
+testDescribe('openApiSpec() — controllers', () => {
+  const service: ServiceDefinition = {
+    GET: { '/health': noop },
+    controllers: [
+      defineController({
+        prefix: '/p/:proj/wiki',
+        tags:   ['Wiki'],
+        GET: {
+          '/tree':        noop,
+          '/pages/:slug': describe(noop, { summary: 'Read a page', tags: ['Pages'] }),
+        },
+      }),
+      defineController({
+        prefix: '/p/:proj/issues',
+        tags:   ['Issues'],
+        POST: { '/': noop },
+      }),
+    ],
+  };
+
+  const doc = openApiSpec(service, { title: 'T', version: '1' });
+
+  it('produces ONE document containing all controllers and root routes', () => {
+    assert.ok(doc.paths['/health']);
+    assert.ok(doc.paths['/p/{proj}/wiki/tree']);
+    assert.ok(doc.paths['/p/{proj}/wiki/pages/{slug}']);
+    assert.ok(doc.paths['/p/{proj}/issues']);
+  });
+
+  it('controller tags fill in operations that declare none', () => {
+    const op = doc.paths['/p/{proj}/wiki/tree'].get as any;
+    assert.deepEqual(op.tags, ['Wiki']);
+  });
+
+  it('route-level meta.tags override the controller tags', () => {
+    const op = doc.paths['/p/{proj}/wiki/pages/{slug}'].get as any;
+    assert.deepEqual(op.tags, ['Pages']);
+  });
+
+  it('prefix parameters are auto-detected on joined paths', () => {
+    const op = doc.paths['/p/{proj}/wiki/tree'].get as any;
+    const names = (op.parameters as any[]).map(p => p.name);
+    assert.ok(names.includes('proj'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security emission (v2)
+// ---------------------------------------------------------------------------
+
+testDescribe('openApiSpec() — security emission', () => {
+  it('routes with a permission get security + x-required-permissions', () => {
+    const service: ServiceDefinition = {
+      GET: {
+        '/public':  noop,
+        '/private': describe(noop, { permission: 'wiki.read' }),
+      },
+    };
+    const doc = openApiSpec(service, { title: 'T', version: '1' });
+
+    const priv = doc.paths['/private'].get as any;
+    assert.deepEqual(priv.security, [{ bearerAuth: [] }]);
+    assert.deepEqual(priv['x-required-permissions'], ['wiki.read']);
+
+    const pub = doc.paths['/public'].get as any;
+    assert.equal(pub.security, undefined);
+    assert.equal(pub['x-required-permissions'], undefined);
+  });
+
+  it('controller-level permission is emitted on every route of the controller', () => {
+    const service: ServiceDefinition = {
+      controllers: [defineController({
+        prefix: '/admin',
+        permission: 'manage_users',
+        GET: { '/users': noop },
+      })],
+    };
+    const doc = openApiSpec(service, { title: 'T', version: '1' });
+    const op  = doc.paths['/admin/users'].get as any;
+    assert.deepEqual(op['x-required-permissions'], ['manage_users']);
+  });
+
+  it('components.securitySchemes.bearerAuth is emitted once with the default scheme', () => {
+    const service: ServiceDefinition = {
+      GET: { '/x': describe(noop, { permission: 'read' }) },
+    };
+    const doc = openApiSpec(service, { title: 'T', version: '1' });
+    assert.deepEqual(doc.components.securitySchemes, {
+      bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+    });
+  });
+
+  it('no securitySchemes when no route declares a permission', () => {
+    const service: ServiceDefinition = { GET: { '/x': noop } };
+    const doc = openApiSpec(service, { title: 'T', version: '1' });
+    assert.equal(doc.components.securitySchemes, undefined);
+  });
+
+  it('AuthBinding.scheme and permissionsExtension override the defaults', () => {
+    const service: ServiceDefinition = {
+      auth: {
+        scheme:               { type: 'apiKey', in: 'header', name: 'X-Api-Key' },
+        permissionsExtension: 'x-perms',
+      },
+      GET: { '/x': describe(noop, { permission: 'read' }) },
+    };
+    const doc = openApiSpec(service, { title: 'T', version: '1' });
+    assert.deepEqual(doc.components.securitySchemes!.bearerAuth,
+      { type: 'apiKey', in: 'header', name: 'X-Api-Key' });
+    const op = doc.paths['/x'].get as any;
+    assert.deepEqual(op['x-perms'], ['read']);
+    assert.equal(op['x-required-permissions'], undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ServiceDefinition.schemas (v2)
+// ---------------------------------------------------------------------------
+
+testDescribe('openApiSpec() — ServiceDefinition.schemas', () => {
+  it('service.schemas are merged into components.schemas', () => {
+    const service: ServiceDefinition = {
+      schemas: { Item: { type: 'object', properties: { name: { type: 'string' } } } },
+      GET: { '/items': noop },
+    };
+    const doc = openApiSpec(service, { title: 'T', version: '1' });
+    assert.deepEqual(doc.components.schemas['Item'],
+      { type: 'object', properties: { name: { type: 'string' } } });
+  });
+
+  it('service.schemas supersede SpecOptions.schemas of the same name', () => {
+    const service: ServiceDefinition = {
+      schemas: { Item: { type: 'object' } },
+      GET: { '/items': noop },
+    };
+    const doc = openApiSpec(service, {
+      title: 'T', version: '1',
+      schemas: { Item: { type: 'string' }, Extra: { type: 'number' } },
+    });
+    assert.deepEqual(doc.components.schemas['Item'], { type: 'object' });
+    assert.deepEqual(doc.components.schemas['Extra'], { type: 'number' }, 'spec options kept as fallback');
   });
 });

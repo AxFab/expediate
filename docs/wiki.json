@@ -19,12 +19,75 @@
   ],
   "docs": [
     {
+      "id": "api-builder.html",
+      "label": "API Builder",
+      "src": "docs/api-builder.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "API Builder — Expediate",
+      "description": ""
+    },
+    {
+      "id": "body-parsing.html",
+      "label": "Body request parsing",
+      "src": "docs/body-parsing.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "Body parsing — Expediate",
+      "description": ""
+    },
+    {
+      "id": "git.html",
+      "label": "Git by http",
+      "src": "docs/git.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "Git-http — Expediate",
+      "description": ""
+    },
+    {
+      "id": "jwt-auth.html",
+      "label": "JWT auth",
+      "src": "docs/jwt-auth.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "JWT auth — Expediate",
+      "description": ""
+    },
+    {
+      "id": "middleware.html",
+      "label": "Middleware",
+      "src": "docs/middleware.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "Middleware — Expediate",
+      "description": ""
+    },
+    {
       "id": "middlewares.html",
       "label": "Middlewares",
       "src": "docs/middlewares.md",
       "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
-      "type": "SoftwareApplication",
-      "title": "",
+      "type": "TechArticle",
+      "title": "Middlewares — Expediate",
+      "description": ""
+    },
+    {
+      "id": "router.html",
+      "label": "Router",
+      "src": "docs/router.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "Router — Expediate",
+      "description": ""
+    },
+    {
+      "id": "static.html",
+      "label": "Static",
+      "src": "docs/static.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "Static — Expediate",
       "description": ""
     }
   ],

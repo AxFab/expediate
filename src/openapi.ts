@@ -20,7 +20,8 @@
  */
 'use strict';
 
-import type { ServiceMethod, ServiceInstance, ServiceDefinition, ApiContext } from './apis.js';
+import { collectRoutes } from './apis.js';
+import type { ServiceMethod, ServiceInstance, ServiceDefinition, ApiContext, Guard } from './apis.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,6 +119,21 @@ export interface OperationMeta {
   responses?: Record<string, ResponseObject>;
   /** Mark as deprecated in the generated spec. */
   deprecated?: boolean;
+  /**
+   * Guards run before this handler, after the API-level and controller-level
+   * guards.  Ignored by spec generation — this is the natural per-route
+   * metadata slot for the request pipeline.
+   */
+  guards?: Guard[];
+  /**
+   * Permission(s) required to call this operation.
+   *
+   * Overrides the controller-level `permission`.  When set, the pipeline
+   * runs `auth.check(ctx, required)` before the guards, and the generated
+   * spec emits `security: [{ bearerAuth: [] }]` plus an
+   * `x-required-permissions` vendor extension on the operation.
+   */
+  permission?: string | string[];
   /** Additional vendor extensions (keys should start with `x-`). */
   [key: string]: unknown;
 }
@@ -195,6 +211,12 @@ export interface OpenApiDocument {
   components: {
     schemas:   Record<string, JsonSchema>;
     responses: Record<string, ResponseObject>;
+    /**
+     * Security schemes — emitted when at least one operation declares a
+     * `permission` (the scheme comes from `AuthBinding.scheme`, defaulting
+     * to HTTP bearer / JWT).
+     */
+    securitySchemes?: Record<string, Record<string, unknown>>;
   };
 }
 
@@ -572,9 +594,12 @@ function buildAnnotatedResponses(
 // Core spec generator
 // ---------------------------------------------------------------------------
 
-/** The five HTTP verbs supported by `apiBuilder`. */
-const VERBS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'] as const;
-type Verb = typeof VERBS[number];
+/** Default OpenAPI security scheme when `AuthBinding.scheme` is absent. */
+const DEFAULT_SECURITY_SCHEME: Record<string, unknown> = {
+  type:         'http',
+  scheme:       'bearer',
+  bearerFormat: 'JWT',
+};
 
 /**
  * Generate an OpenAPI 3.1.0 document from a {@link ServiceDefinition}.
@@ -638,11 +663,15 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
     },
   };
 
-  // Merge schemas: built-ins ← service-level ← caller-level (last wins).
+  // Merge schemas: built-ins ← service-level openapi meta ← caller-level
+  // ← service-definition `schemas` (last wins).  `ServiceDefinition.schemas`
+  // supersedes `SpecOptions.schemas`; the spec-options form is kept as a
+  // fallback for callers that do not use the shared declaration.
   const schemas: Record<string, JsonSchema> = {
     ...builtinSchemas,
     ...svcMeta?.schemas,
     ...opts.schemas,
+    ...service.schemas,
   };
 
   const responses: Record<string, ResponseObject> = {
@@ -657,54 +686,64 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
   }
 
   // ── Paths ────────────────────────────────────────────────────────────────────
+  // Operates on the merged route table (root route maps + controllers), so a
+  // multi-controller service still produces ONE document.  Controller `tags`
+  // fill in `OperationMeta.tags` when a route declares none.
   const paths: Record<string, Record<string, unknown>> = {};
+  const routes = collectRoutes(service);
 
-  for (const verb of VERBS) {
-    const routeMap = service[verb];
-    if (!routeMap) continue;
+  const permissionsExtension = service.auth?.permissionsExtension ?? 'x-required-permissions';
+  let   securedRoutes        = false;
 
-    for (const [pattern, handler] of Object.entries(routeMap)) {
-      const openApiPath = toOpenApiPath(pattern, basePath);
-      if (!paths[openApiPath]) paths[openApiPath] = {};
+  for (const route of routes) {
+    const { verb, path: pattern, meta } = route;
+    const openApiPath = toOpenApiPath(pattern, basePath);
+    if (!paths[openApiPath]) paths[openApiPath] = {};
 
-      // Retrieve attached metadata (if any).
-      const meta: OperationMeta | undefined =
-        (handler as any)[DESCRIBE_META] as OperationMeta | undefined;
+    // ── Parameters ─────────────────────────────────────────────────────────
+    const annotatedParams: ParameterObject[] = meta?.parameters ?? [];
+    const inferredParams  = extractPathParams(pattern, annotatedParams);
+    const parameters      = [...annotatedParams, ...inferredParams];
 
-      // ── Parameters ─────────────────────────────────────────────────────────
-      const annotatedParams: ParameterObject[] = meta?.parameters ?? [];
-      const inferredParams  = extractPathParams(pattern, annotatedParams);
-      const parameters      = [...annotatedParams, ...inferredParams];
+    // ── Responses ──────────────────────────────────────────────────────────
+    const operationResponses = meta?.responses
+      ? buildAnnotatedResponses(meta.responses)
+      : buildDefaultResponses(verb);
 
-      // ── Responses ──────────────────────────────────────────────────────────
-      const operationResponses = meta?.responses
-        ? buildAnnotatedResponses(meta.responses)
-        : buildDefaultResponses(verb);
+    // ── Operation object ───────────────────────────────────────────────────
+    const operation: Record<string, unknown> = {
+      operationId: meta?.operationId ?? buildOperationId(verb, pattern),
+      ...(meta?.summary     && { summary:     meta.summary }),
+      ...(meta?.description && { description: meta.description }),
+      ...(meta?.deprecated  && { deprecated:  true }),
+      ...(parameters.length > 0 && { parameters }),
+      ...(meta?.requestBody && { requestBody: meta.requestBody }),
+      responses: operationResponses,
+    };
 
-      // ── Operation object ───────────────────────────────────────────────────
-      const operation: Record<string, unknown> = {
-        operationId: meta?.operationId ?? buildOperationId(verb, pattern),
-        ...(meta?.summary     && { summary:     meta.summary }),
-        ...(meta?.description && { description: meta.description }),
-        ...(meta?.deprecated  && { deprecated:  true }),
-        ...(parameters.length > 0 && { parameters }),
-        ...(meta?.requestBody && { requestBody: meta.requestBody }),
-        responses: operationResponses,
-      };
+    // Apply route tags (meta-level, else controller-level), then the service
+    // default tag when neither is declared.
+    const opTags = route.tags ?? (defaultTag ? [defaultTag] : undefined);
+    if (opTags) operation['tags'] = opTags;
 
-      // Apply default tag when the operation has no explicit tags.
-      const opTags = meta?.tags ?? (defaultTag ? [defaultTag] : undefined);
-      if (opTags) operation['tags'] = opTags;
-
-      // Carry through any vendor extensions (x-* keys).
-      if (meta) {
-        for (const [k, v] of Object.entries(meta)) {
-          if (k.startsWith('x-')) operation[k] = v;
-        }
+    // Carry through any vendor extensions (x-* keys).
+    if (meta) {
+      for (const [k, v] of Object.entries(meta)) {
+        if (k.startsWith('x-')) operation[k] = v;
       }
-
-      paths[openApiPath][verb.toLowerCase()] = operation;
     }
+
+    // ── Security ───────────────────────────────────────────────────────────
+    // Routes carrying a permission requirement (route- or controller-level)
+    // are marked with the bearerAuth scheme and the vendor extension listing
+    // the required permissions.
+    if (route.permission) {
+      securedRoutes = true;
+      operation['security']            = [{ bearerAuth: [] }];
+      operation[permissionsExtension]  = route.permission;
+    }
+
+    paths[openApiPath][verb.toLowerCase()] = operation;
   }
 
   // ── Assemble document ────────────────────────────────────────────────────────
@@ -718,7 +757,16 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
     ...(opts.servers && { servers: opts.servers }),
     ...(tags.length > 0 && { tags }),
     paths,
-    components: { schemas, responses },
+    components: {
+      schemas,
+      responses,
+      // Emitted once when at least one operation declares a permission.
+      ...(securedRoutes && {
+        securitySchemes: {
+          bearerAuth: service.auth?.scheme ?? DEFAULT_SECURITY_SCHEME,
+        },
+      }),
+    },
   };
 
   return doc;

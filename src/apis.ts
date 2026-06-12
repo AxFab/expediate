@@ -21,9 +21,16 @@
 'use strict';
 
 import createRouter from './router.js';
-import type { RouterRequest, RouterResponse, Router } from './router.js';
-import { openApiSpec, serializeSpec } from './openapi.js';
-import type { SpecOptions, SpecFormat, OpenApiDocument } from './openapi.js';
+import type { RouterRequest, RouterResponse, Router, Middleware } from './router.js';
+import { openApiSpec, serializeSpec, DESCRIBE_META } from './openapi.js';
+import type {
+  SpecOptions,
+  SpecFormat,
+  OpenApiDocument,
+  OperationMeta,
+  JsonSchema,
+  RequestBodyObject,
+} from './openapi.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,14 +47,19 @@ import type { SpecOptions, SpecFormat, OpenApiDocument } from './openapi.js';
  * ```ts
  * GET: {
  *   '/items/:id': function (ctx: ApiContext) {
- *     const id  = ctx.query.route.id;   // ':id' from the path pattern
+ *     const id  = ctx.params.id;        // ':id' from the path pattern
  *     const fmt = ctx.query.url.format; // '?format=json' from the query string
  *     return getItem(id, fmt);
  *   },
  * }
  * ```
+ *
+ * @template TUser  - The shape of the authenticated user payload (e.g.
+ *                    `TokenPayload` from the JWT plugin). Defaults to
+ *                    `unknown`, forcing explicit typing for safe access.
+ * @template TState - The shape of the guard-produced `state` bag.
  */
-export interface ApiContext {
+export interface ApiContext<TUser = unknown, TState = Record<string, unknown>> {
   /** Route and URL query parameters, separated by origin. */
   query: {
     /**
@@ -66,6 +78,12 @@ export interface ApiContext {
     url: Record<string, string | string[]>;
   };
   /**
+   * Shorthand alias for {@link ApiContext.query}.route — the named parameters
+   * captured from the route pattern.  This is the dominant access pattern;
+   * the namespaced form remains available for collision cases.
+   */
+  params: Record<string, string>;
+  /**
    * The request path as seen by this API router, after any prefix stripping
    * performed by a parent `use()` mount.
    */
@@ -77,7 +95,15 @@ export interface ApiContext {
    * `req.user` before the service method is called.  `undefined` when no
    * authentication data has been attached.
    */
-  user?: any;
+  user?: TUser;
+  /**
+   * Values produced by guards (loaded resources, resolved roles, …).
+   *
+   * Each guard that returns an object has that object shallow-merged into
+   * this bag before the next guard (or the handler) runs.  Starts as `{}`
+   * for every request.
+   */
+  state: TState;
 }
 
 /**
@@ -148,6 +174,160 @@ export type ServiceMethods<TInstance extends ServiceInstance = ServiceInstance> 
 export type RouteMap<TInstance extends ServiceInstance = ServiceInstance> = {
   [path: string]: ServiceMethod<TInstance>;
 };
+
+/**
+ * A pre-handler hook running in the `ctx` world.
+ *
+ * Guards attach at three levels — API (`ServiceDefinition.guards`),
+ * controller (`ControllerDefinition.guards`), and route
+ * (`OperationMeta.guards` via `describe()`) — and run outermost-first:
+ *
+ * ```
+ * auth.authenticate → auth.check → api guards → controller guards → route guards → handler
+ * ```
+ *
+ * A guard may:
+ * - **throw / reject** an {@link ApiError} → translated to an HTTP error response;
+ * - **return an object** → shallow-merged into `ctx.state`;
+ * - **return void** → pure check.
+ *
+ * Guards are loosely typed on purpose (`ctx.user` is `any` here); declare
+ * `ApiContext<TUser, TState>` explicitly in handlers for strict typing.
+ *
+ * @example
+ * ```ts
+ * const requireAdmin: Guard = (ctx) => {
+ *   if (!ctx.user?.isAdmin) throw { status: 403, message: 'Admin access required' };
+ *   return { admin: true };   // → ctx.state.admin
+ * };
+ * ```
+ */
+export type Guard = (
+  ctx: ApiContext<any, Record<string, unknown>>,
+  req: RouterRequest,
+) => void | Record<string, unknown> | Promise<void | Record<string, unknown>>;
+
+/**
+ * A group of routes sharing a path prefix, default OpenAPI tags, guards, and
+ * a default permission requirement.
+ *
+ * Controllers are *route organisation*, not isolation boundaries: handlers in
+ * every controller run with `this` bound to the same service instance (the
+ * instance lifecycle — `scope` / `data` / `setup` / `methods` — stays at the
+ * {@link ServiceDefinition} level).
+ *
+ * @template TInstance - The shape of the service's state object.
+ */
+export interface ControllerDefinition<TInstance extends ServiceInstance = ServiceInstance> {
+  /** Path prefix prepended to every route in this controller (may contain params). */
+  prefix?: string;
+  /** Default OpenAPI tags applied to routes that do not declare their own. */
+  tags?: string[];
+  /** Guards run before every handler of this controller (see {@link Guard}). */
+  guards?: Guard[];
+  /**
+   * Default permission requirement for every route of this controller.
+   * Route-level `OperationMeta.permission` overrides it.  When set, the
+   * pipeline runs `auth.check(ctx, required)` before the guards.
+   */
+  permission?: string | string[];
+
+  /** Route handlers for `GET` requests (paths relative to `prefix`). */
+  GET?:    RouteMap<TInstance>;
+  /** Route handlers for `POST` requests (paths relative to `prefix`). */
+  POST?:   RouteMap<TInstance>;
+  /** Route handlers for `PUT` requests (paths relative to `prefix`). */
+  PUT?:    RouteMap<TInstance>;
+  /** Route handlers for `DELETE` requests (paths relative to `prefix`). */
+  DELETE?: RouteMap<TInstance>;
+  /** Route handlers for `PATCH` requests (paths relative to `prefix`). */
+  PATCH?:  RouteMap<TInstance>;
+}
+
+/**
+ * Identity helper for type inference and discoverability when declaring a
+ * {@link ControllerDefinition} in its own file.
+ *
+ * @example
+ * ```ts
+ * export const wikiController = defineController({
+ *   prefix: '/p/:proj/wiki',
+ *   tags: ['Wiki'],
+ *   permission: 'wiki.read',
+ *   GET: { '/tree': (ctx) => listPages(ctx.params.proj) },
+ * });
+ * ```
+ */
+export function defineController<TInstance extends ServiceInstance = ServiceInstance>(
+  c: ControllerDefinition<TInstance>,
+): ControllerDefinition<TInstance> { return c; }
+
+/**
+ * Authentication / authorization binding connecting an auth layer (typically
+ * the JWT plugin) to the API Builder pipeline.
+ *
+ * @example
+ * ```ts
+ * const jwt = createJwtPlugin({ accessTokenSecret: SECRET });
+ * const api = apiBuilder({
+ *   auth: { authenticate: jwt.authenticate },  // default check() reads ctx.user.permissions
+ *   controllers: [ ... ],
+ * });
+ * ```
+ *
+ * @template TUser - The shape of the authenticated user payload.
+ */
+export interface AuthBinding<TUser = unknown> {
+  /**
+   * Router middleware run before any guard or handler — typically
+   * `jwtPlugin.authenticate`.  Registered by `apiBuilder` on its internal
+   * router, so the client no longer wires it per-mount.
+   */
+  authenticate?: Middleware;
+
+  /**
+   * Enforce a permission requirement for the current request.
+   *
+   * Default implementation: require `ctx.user` (else `401`) and check that
+   * `ctx.user.permissions` contains **all** required entries (else `403`) —
+   * i.e. the exact semantics of `jwtPlugin.requirePermission`, but in the
+   * `ctx` world.  Override for resource-scoped models (per-project roles,
+   * ownership, …); the override may load resources and share them through
+   * `ctx.state`.
+   *
+   * Failure is signalled by throwing / rejecting an {@link ApiError}.
+   */
+  check?: (ctx: ApiContext<TUser>, required: string[]) => void | Promise<void>;
+
+  /**
+   * OpenAPI security scheme emitted into `components.securitySchemes.bearerAuth`
+   * when at least one route declares a `permission`.
+   *
+   * Default: `{ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }`.
+   */
+  scheme?: Record<string, unknown>;
+
+  /**
+   * Name of the vendor extension listing the required permissions on each
+   * secured operation in the generated OpenAPI document.
+   *
+   * Default: `'x-required-permissions'`.
+   */
+  permissionsExtension?: string;
+}
+
+/**
+ * Options controlling runtime validation of declared request schemas.
+ *
+ * Enabled via `ServiceDefinition.validate` (pass `true` for defaults).
+ */
+export interface ValidateOptions {
+  /**
+   * Validate request bodies against `OperationMeta.requestBody` schemas.
+   * Failures produce `400` with `{ message, fieldErrors }`.  Default `true`.
+   */
+  requests?: boolean;
+}
 
 /**
  * Extra methods attached to the router returned by {@link apiBuilder}.
@@ -264,6 +444,43 @@ export interface ServiceDefinition<TInstance extends ServiceInstance = ServiceIn
    */
   methods?: ServiceMethods<TInstance>;
 
+  /**
+   * Sub-controllers merged into this API.
+   *
+   * Each controller's routes are rewritten to `joinPath(prefix, path)`, then
+   * all routes of all controllers (plus the root-level route maps below) are
+   * concatenated and sorted by specificity **globally**.  A duplicate
+   * `(verb, joined path)` pair across controllers **throws at build time**.
+   *
+   * All controllers share the single service instance lifecycle declared at
+   * this level — controllers organise routes, they do not isolate state.
+   */
+  controllers?: ControllerDefinition<TInstance>[];
+
+  /** Guards run before every handler of the whole API (see {@link Guard}). */
+  guards?: Guard[];
+
+  /** Authentication / authorization binding (see {@link AuthBinding}). */
+  auth?: AuthBinding;
+
+  /**
+   * Enable runtime validation of declared request schemas.
+   *
+   * When truthy, request bodies are validated against the JSON Schema found
+   * in each route's `OperationMeta.requestBody` before the handler runs.
+   * Failures produce `400` with `{ message, fieldErrors }`.
+   */
+  validate?: boolean | ValidateOptions;
+
+  /**
+   * Reusable JSON Schema components, shared by request validation and spec
+   * generation.  `$ref: '#/components/schemas/Name'` references in operation
+   * metadata are resolved against this map by the validator, and the map is
+   * merged into `components.schemas` of the generated OpenAPI document
+   * (taking precedence over `SpecOptions.schemas`).
+   */
+  schemas?: Record<string, JsonSchema>;
+
   /** Route handlers for `GET` requests. */
   GET?:    RouteMap<TInstance>;
   /** Route handlers for `POST` requests. */
@@ -274,6 +491,380 @@ export interface ServiceDefinition<TInstance extends ServiceInstance = ServiceIn
   DELETE?: RouteMap<TInstance>;
   /** Route handlers for `PATCH` requests. */
   PATCH?:  RouteMap<TInstance>;
+}
+
+// ---------------------------------------------------------------------------
+// Route collection (controller merge)
+// ---------------------------------------------------------------------------
+
+/** The five HTTP verbs supported by `apiBuilder`. */
+const VERBS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'] as const;
+
+/** One of the five HTTP verbs supported by `apiBuilder`. */
+export type ApiVerb = typeof VERBS[number];
+
+/**
+ * One merged route entry produced by {@link collectRoutes}.
+ *
+ * Records per-route provenance — effective tags, composed guard chain, and
+ * permission requirement — consumed by both the request pipeline
+ * (`apiBuilder`) and the spec generator (`openApiSpec`).
+ *
+ * @template TInstance - The shape of the service's state object.
+ */
+export interface CollectedRoute<TInstance extends ServiceInstance = ServiceInstance> {
+  /** HTTP verb of the route. */
+  verb: ApiVerb;
+  /** Full path after joining the controller prefix (Express-style pattern). */
+  path: string;
+  /** The route handler (possibly `describe()`-wrapped). */
+  handler: ServiceMethod<TInstance>;
+  /** Operation metadata attached via `describe()`, when present. */
+  meta?: OperationMeta;
+  /** Effective tags: route-level `meta.tags`, else the controller's `tags`. */
+  tags?: string[];
+  /** Composed guard chain: API guards, then controller guards, then route guards. */
+  guards: Guard[];
+  /** Normalised permission requirement (route-level overrides controller-level). */
+  permission?: string[];
+  /** Human-readable controller identifier used in diagnostics. */
+  controller: string;
+}
+
+/**
+ * Join a controller prefix and a route path into a single normalised pattern.
+ *
+ * Duplicate slashes are collapsed and a trailing slash is stripped (except
+ * for the root path), so `joinPath('/p/:proj/wiki', '/')` → `'/p/:proj/wiki'`.
+ *
+ * @param prefix - The controller prefix (may be empty).
+ * @param path   - The route path relative to the prefix.
+ */
+function joinPath(prefix: string, path: string): string {
+  const joined = `/${prefix}/${path}`.replace(/\/+/g, '/');
+  return joined.length > 1 ? joined.replace(/\/$/, '') : joined;
+}
+
+/**
+ * Compute the specificity score of a route pattern.
+ *
+ * `score = (segment count × 100) − (parameter count × 10)`.  Higher scores
+ * are registered first so that more precise patterns (more segments, fewer
+ * parameters) cannot be shadowed by prefix matches.
+ */
+function routeScore(path: string): number {
+  const segs = path.split('/').filter(s => s.length > 0);
+  return segs.length * 100 - segs.filter(s => s.startsWith(':')).length * 10;
+}
+
+/**
+ * Normalise a `permission` declaration (`string | string[]`) to an array,
+ * or `undefined` when absent.
+ */
+function normalizePermission(permission: string | string[] | undefined): string[] | undefined {
+  if (permission === undefined) return undefined;
+  return Array.isArray(permission) ? permission : [permission];
+}
+
+/**
+ * Build the merged route table for a service definition.
+ *
+ * The algorithm (see `docs/api-builder-v2-design.md` §4):
+ * 1. Normalises the root-level route maps into an anonymous controller
+ *    (`prefix: ''`) so v1 single-definition services keep working.
+ * 2. Rewrites each controller route to `joinPath(prefix, path)`.
+ * 3. Concatenates all routes of all controllers, then sorts them by
+ *    decreasing specificity **globally** (the score is computed on the
+ *    joined path, so prefix parameters are accounted for).
+ * 4. **Throws** on a duplicate `(verb, joined path)` pair, naming both
+ *    declaring controllers.
+ * 5. Records per-route provenance (tags, guards, permission) consumed by
+ *    both the request pipeline and `openApiSpec()`.
+ *
+ * Exported for use by `openapi.ts`; not part of the public package API.
+ *
+ * @param service - The service definition to collect routes from.
+ * @returns The merged, globally sorted route table.
+ * @throws  Error on duplicate `(verb, path)` declarations.
+ */
+export function collectRoutes<TInstance extends ServiceInstance = ServiceInstance>(
+  service: ServiceDefinition<TInstance>,
+): CollectedRoute<TInstance>[] {
+  // 1. Root route maps form an implicit, anonymous controller.
+  const rootController: ControllerDefinition<TInstance> = {
+    prefix: '',
+    GET:    service.GET,
+    POST:   service.POST,
+    PUT:    service.PUT,
+    DELETE: service.DELETE,
+    PATCH:  service.PATCH,
+  };
+  const controllers: ControllerDefinition<TInstance>[] =
+    [rootController, ...(service.controllers ?? [])];
+
+  /** Human-readable controller name for diagnostics. */
+  const nameOf = (c: ControllerDefinition<TInstance>, index: number): string =>
+    index === 0 ? '<root>' : (c.tags?.[0] ?? c.prefix ?? `#${index}`);
+
+  const routes: CollectedRoute<TInstance>[] = [];
+  /** Duplicate detection: `"VERB /joined/path"` → declaring controller name. */
+  const seen = new Map<string, string>();
+
+  controllers.forEach((controller, index) => {
+    const controllerName = nameOf(controller, index);
+    const prefix         = controller.prefix ?? '';
+
+    for (const verb of VERBS) {
+      const routeMap = controller[verb];
+      if (!routeMap) continue;
+
+      for (const [pattern, handler] of Object.entries(routeMap)) {
+        const path = joinPath(prefix, pattern);
+
+        // 4. Loud failure on duplicates — silent shadowing is unacceptable
+        // with multi-file composition.
+        const dupKey   = `${verb} ${path}`;
+        const declarer = seen.get(dupKey);
+        if (declarer !== undefined) {
+          throw new Error(
+            `apiBuilder: duplicate route ${verb} ${path}\n` +
+            `  declared by controllers '${declarer}' and '${controllerName}'`);
+        }
+        seen.set(dupKey, controllerName);
+
+        const meta = (handler as any)[DESCRIBE_META] as OperationMeta | undefined;
+
+        routes.push({
+          verb,
+          path,
+          handler,
+          meta,
+          tags:       meta?.tags ?? controller.tags,
+          guards:     [
+            ...(service.guards ?? []),
+            ...(controller.guards ?? []),
+            ...(meta?.guards ?? []),
+          ],
+          permission: normalizePermission(meta?.permission ?? controller.permission),
+          controller: controllerName,
+        });
+      }
+    }
+  });
+
+  // 3. Global specificity sort across all controllers.
+  routes.sort((a, b) =>
+    routeScore(b.path) - routeScore(a.path) || b.path.localeCompare(a.path));
+
+  return routes;
+}
+
+// ---------------------------------------------------------------------------
+// Request-body validation (JSON Schema subset)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a `$ref` of the form `#/components/schemas/Name` against the
+ * service's schema components, following chained references with a small
+ * depth guard against accidental reference cycles.
+ *
+ * Unknown references resolve to the empty schema `{}` (accepts anything),
+ * mirroring the permissive behaviour of the spec generator.
+ */
+function resolveRef(schema: JsonSchema, components: Record<string, JsonSchema>): JsonSchema {
+  let current = schema;
+  for (let depth = 0; depth < 16 && current.$ref; depth++) {
+    const match = /^#\/components\/schemas\/(.+)$/.exec(current.$ref);
+    const next  = match ? components[match[1]] : undefined;
+    if (!next) return {};
+    current = next;
+  }
+  return current;
+}
+
+/** Append a field error, keeping the first message reported for each path. */
+function addError(errors: Record<string, string>, path: string, message: string): void {
+  const key = path || '$';
+  if (!(key in errors)) errors[key] = message;
+}
+
+/** Join a parent path and a child key into a dotted field-error path. */
+function childPath(path: string, key: string | number): string {
+  return path ? `${path}.${key}` : String(key);
+}
+
+/** Map a runtime value to its JSON Schema type name. */
+function jsonTypeOf(value: unknown): string {
+  if (value === null)      return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+
+/**
+ * Validate a value against a JSON Schema subset, collecting field errors.
+ *
+ * Supported keywords: `type`, `required`, `properties`, `items`, `enum`,
+ * `pattern`, `minLength` / `maxLength`, `minimum` / `maximum`,
+ * `additionalProperties`, `allOf` / `anyOf` / `oneOf`, and `$ref` (resolved
+ * against `components`, i.e. `ServiceDefinition.schemas`).
+ *
+ * Field-error paths are dotted (`name`, `address.city`, `tags.0`); errors on
+ * the value itself are keyed `'$'`.
+ *
+ * Exported for testing; not part of the public package API.
+ *
+ * @param value      - The value to validate.
+ * @param schema     - The schema to validate against.
+ * @param components - Reusable schemas for `$ref` resolution.
+ * @param path       - Current field path (used in recursion; omit at the root).
+ * @param errors     - Accumulator (used in recursion; omit at the root).
+ * @returns A map of field path → first error message (empty when valid).
+ */
+export function validateSchema(
+  value:      unknown,
+  schema:     JsonSchema,
+  components: Record<string, JsonSchema> = {},
+  path        = '',
+  errors:     Record<string, string> = {},
+): Record<string, string> {
+  const s = resolveRef(schema, components);
+
+  // ── Combinators ───────────────────────────────────────────────────────────
+  if (s.allOf) {
+    for (const sub of s.allOf) validateSchema(value, sub, components, path, errors);
+  }
+  if (s.anyOf) {
+    const passes = s.anyOf.some(sub =>
+      Object.keys(validateSchema(value, sub, components, path, {})).length === 0);
+    if (!passes) addError(errors, path, 'does not match any of the expected schemas (anyOf)');
+  }
+  if (s.oneOf) {
+    const matches = s.oneOf.filter(sub =>
+      Object.keys(validateSchema(value, sub, components, path, {})).length === 0).length;
+    if (matches !== 1)
+      addError(errors, path, `must match exactly one schema (oneOf), matched ${matches}`);
+  }
+
+  // ── type ─────────────────────────────────────────────────────────────────
+  if (s.type !== undefined) {
+    const actual = jsonTypeOf(value);
+    const ok = s.type === 'integer'
+      ? actual === 'number' && Number.isInteger(value)
+      : actual === s.type;
+    if (!ok) {
+      addError(errors, path, `must be of type ${s.type}`);
+      return errors;     // further keyword checks would be meaningless
+    }
+  }
+
+  // ── enum ─────────────────────────────────────────────────────────────────
+  if (s.enum && !s.enum.some(e => e === value ||
+      (typeof e === 'object' && JSON.stringify(e) === JSON.stringify(value)))) {
+    addError(errors, path, `must be one of: ${s.enum.map(e => JSON.stringify(e)).join(', ')}`);
+  }
+
+  // ── string keywords ──────────────────────────────────────────────────────
+  if (typeof value === 'string') {
+    if (typeof s.pattern === 'string' && !new RegExp(s.pattern).test(value))
+      addError(errors, path, `does not match pattern ${s.pattern}`);
+    if (typeof s.minLength === 'number' && value.length < s.minLength)
+      addError(errors, path, `must be at least ${s.minLength} characters`);
+    if (typeof s.maxLength === 'number' && value.length > s.maxLength)
+      addError(errors, path, `must be at most ${s.maxLength} characters`);
+  }
+
+  // ── number keywords ──────────────────────────────────────────────────────
+  if (typeof value === 'number') {
+    if (typeof s.minimum === 'number' && value < s.minimum)
+      addError(errors, path, `must be >= ${s.minimum}`);
+    if (typeof s.maximum === 'number' && value > s.maximum)
+      addError(errors, path, `must be <= ${s.maximum}`);
+  }
+
+  // ── array keywords ───────────────────────────────────────────────────────
+  if (Array.isArray(value) && s.items) {
+    value.forEach((item, i) =>
+      validateSchema(item, s.items as JsonSchema, components, childPath(path, i), errors));
+  }
+
+  // ── object keywords ──────────────────────────────────────────────────────
+  if (jsonTypeOf(value) === 'object') {
+    const obj = value as Record<string, unknown>;
+
+    if (s.required) {
+      for (const prop of s.required) {
+        if (obj[prop] === undefined)
+          addError(errors, childPath(path, prop), 'is required');
+      }
+    }
+
+    if (s.properties) {
+      for (const [prop, sub] of Object.entries(s.properties)) {
+        if (obj[prop] !== undefined)
+          validateSchema(obj[prop], sub, components, childPath(path, prop), errors);
+      }
+    }
+
+    if (s.additionalProperties !== undefined && s.additionalProperties !== true) {
+      const known = new Set(Object.keys(s.properties ?? {}));
+      for (const prop of Object.keys(obj)) {
+        if (known.has(prop)) continue;
+        if (s.additionalProperties === false)
+          addError(errors, childPath(path, prop), 'unknown property');
+        else
+          validateSchema(obj[prop], s.additionalProperties as JsonSchema,
+            components, childPath(path, prop), errors);
+      }
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Validate a request body against a route's declared `requestBody` schema.
+ *
+ * - Missing body + `requestBody.required` → `400`.
+ * - Missing body, not required → skipped.
+ * - Schema violations → `400` with `{ message, fieldErrors }` (see
+ *   {@link validateSchema} for the `fieldErrors` shape).
+ *
+ * The `application/json` content entry is preferred; the first declared
+ * content entry is used as a fallback.
+ *
+ * @throws An {@link ApiError} (`status: 400`) on validation failure.
+ */
+function validateRequestBody(
+  requestBody: RequestBodyObject,
+  body:        unknown,
+  components:  Record<string, JsonSchema>,
+): void {
+  const content = requestBody.content?.['application/json']
+    ?? Object.values(requestBody.content ?? {})[0];
+  const schema  = content?.schema;
+
+  if (body === undefined || body === null) {
+    if (requestBody.required) {
+      throw {
+        status: 400,
+        data: {
+          message:     'Request body validation failed',
+          fieldErrors: { $: 'request body is required' },
+        },
+      } satisfies ApiError;
+    }
+    return;
+  }
+
+  if (!schema) return;
+
+  const fieldErrors = validateSchema(body, schema, components);
+  if (Object.keys(fieldErrors).length > 0) {
+    throw {
+      status: 400,
+      data: { message: 'Request body validation failed', fieldErrors },
+    } satisfies ApiError;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,79 +1072,110 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
   /** In-flight build promises: deduplicates concurrent keyed instance builds. */
   const building: Record<string, Promise<TInstance>> = {};
 
+  // Merge controllers and root route maps into the global route table.
+  // Throws here — at build time — on duplicate (verb, path) declarations.
+  const routes = collectRoutes(service);
+
+  // ── Auth binding ─────────────────────────────────────────────────────────
+  // Register the authenticate middleware first so it runs before the 503
+  // readiness guard, every guard, and every handler.
+  if (service.auth?.authenticate)
+    api.use('/', service.auth.authenticate);
+
   /**
-   * Register all route handlers from a route map for a given HTTP method.
+   * Default permission check: mirrors `jwtPlugin.requirePermission` semantics
+   * in the `ctx` world — `401` when unauthenticated, `403` when any required
+   * permission is missing from `ctx.user.permissions`.
+   */
+  const defaultCheck = (ctx: ApiContext<any>, required: string[]): void => {
+    const user = ctx.user as { permissions?: string[] } | undefined;
+    if (!user)
+      throw { status: 401, message: 'Authentication required' } satisfies ApiError;
+    const perms = user.permissions ?? [];
+    if (!required.every(p => perms.includes(p))) {
+      throw {
+        status:  403,
+        message: `Insufficient permissions. Required: ${required.join(', ')}`,
+      } satisfies ApiError;
+    }
+  };
+  const check = service.auth?.check ?? defaultCheck;
+
+  // ── Validation configuration ─────────────────────────────────────────────
+  const validateRequests = service.validate === true
+    || (typeof service.validate === 'object' && service.validate.requests !== false);
+  /** Schema components shared by the validator and the spec generator. */
+  const schemaComponents: Record<string, JsonSchema> = {
+    ...(service as any).openapi?.schemas,
+    ...service.schemas,
+  };
+
+  /**
+   * Register a set of collected routes for one HTTP verb.
    *
-   * Each handler:
+   * Each registered handler runs the full pipeline:
    * 1. Resolves the correct service instance (awaiting setup when needed).
-   * 2. Builds an {@link ApiContext} from the incoming request.
-   * 3. Invokes the service method with `(ctx, body)`.
-   * 4. Sends the return value as JSON (or 201 if falsy).
-   * 5. Catches thrown / rejected {@link ApiError} objects and translates them
-   *    into the appropriate HTTP error response.
+   * 2. Builds an {@link ApiContext} from the incoming request
+   *    (`params` aliases `query.route`; `state` starts empty).
+   * 3. Runs `auth.check(ctx, required)` when the route declares a `permission`.
+   * 4. Validates the request body against the declared schema (when enabled).
+   * 5. Runs the guard chain (API → controller → route), shallow-merging any
+   *    returned objects into `ctx.state`.
+   * 6. Invokes the service method with `(ctx, body)`.
+   * 7. Sends the return value as JSON (or 201 if falsy).
+   * 8. Catches thrown / rejected {@link ApiError} objects from any stage and
+   *    translates them into the appropriate HTTP error response.
    *
-   * @param routeMap - Map of path patterns to service methods (`undefined` = skip).
-   * @param register - Registers a handler on the router for the current HTTP method.
+   * @param verbRoutes - Pre-sorted routes for the verb being registered.
+   * @param register   - Registers a handler on the router for that verb.
    */
   function buildRoutes(
-    routeMap: RouteMap<TInstance> | undefined,
-    register: (path: string, handler: (req: RouterRequest, res: RouterResponse) => void) => void,
+    verbRoutes: CollectedRoute<TInstance>[],
+    register:   (path: string, handler: (req: RouterRequest, res: RouterResponse) => void) => void,
   ): void {
-    if (!routeMap) return;
-
-    // Sort routes by decreasing specificity so that more precise patterns
-    // (more segments, fewer parameters) are registered first in the router.
-    // Without this, a plain path like '/items' would match '/items/1' as a
-    // prefix and steal requests intended for '/items/:id'.
-    // Specificity = (segment count * 100) - (parameter count * 10).
-    const sortedPaths = Object.keys(routeMap).sort((a, b) => {
-      const score = (p: string) => {
-        const segs = p.split('/').filter(s => s.length > 0);
-        return segs.length * 100 - segs.filter(s => s.startsWith(':')).length * 10;
-      };
-      return score(b) - score(a) || b.localeCompare(a);
-    });
-
-    for (const path of sortedPaths) {
-      const method = routeMap[path];
-
-      register(path, (req: RouterRequest, res: RouterResponse): void => {
-        const ctx: ApiContext = {
+    for (const route of verbRoutes) {
+      register(route.path, (req: RouterRequest, res: RouterResponse): void => {
+        const routeParams = req.queries?.route ?? {};
+        const ctx: ApiContext<any> = {
           query: {
-            route: req.queries?.route ?? {},
-            url:   req.queries?.url   ?? {},
+            route: routeParams,
+            url:   req.queries?.url ?? {},
           },
-          path: req.path,
-          user: (req as any).user,
+          params: routeParams,
+          path:   req.path,
+          user:   (req as any).user,
+          state:  {},
         };
         const body = (req as any).body;
 
         // Await instance resolution (no-op microtask for singletons; may
         // trigger async buildModule for keyed / ephemeral instances).
         resolveInstance(service, modules, building, req)
-          .then(instance => {
-            const ret = method.apply(instance, [ctx, body]);
+          .then(async instance => {
+            // 3. Declarative authorization (opt-in per route / controller).
+            if (route.permission)
+              await check(ctx, route.permission);
 
-            if (ret instanceof Promise) {
-              return ret
-                .then(val => {
-                  if (val !== undefined && val !== null && val !== false && val !== 0 && val !== '')
-                    sendJson(res, val);
-                  else
-                    res.status(201).end();
-                })
-                .catch(err => {
-                  // console.error(err)
-                  sendError(res, err)
-                });
+            // 4. Request-body validation from the declared schema.
+            if (validateRequests && route.meta?.requestBody)
+              validateRequestBody(route.meta.requestBody, body, schemaComponents);
+
+            // 5. Guard chain — outermost first; returned objects accumulate
+            // into ctx.state for downstream guards and the handler.
+            for (const guard of route.guards) {
+              const produced = await guard(ctx, req);
+              if (produced && typeof produced === 'object')
+                Object.assign(ctx.state, produced);
             }
 
-            if (ret !== undefined && ret !== null && ret !== false && ret !== 0 && ret !== '')
-              sendJson(res, ret);
+            // 6 + 7. Handler invocation and response conventions.
+            const val = await route.handler.apply(instance, [ctx, body]);
+            if (val !== undefined && val !== null && val !== false && val !== 0 && val !== '')
+              sendJson(res, val);
             else
               res.status(201).end();
           })
-          .catch(err =>  {
+          .catch(err => {
             // console.error(err)
             sendError(res, err)
           });
@@ -563,11 +1185,11 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
 
   /** Convenience wrapper to register routes for all five HTTP verbs. */
   function registerAllRoutes(): void {
-    buildRoutes(service.GET,    (path, h) => api.get(path,    h as any));
-    buildRoutes(service.POST,   (path, h) => api.post(path,   h as any));
-    buildRoutes(service.PUT,    (path, h) => api.put(path,    h as any));
-    buildRoutes(service.DELETE, (path, h) => api.delete(path, h as any));
-    buildRoutes(service.PATCH,  (path, h) => api.patch(path,  h as any));
+    buildRoutes(routes.filter(r => r.verb === 'GET'),    (path, h) => api.get(path,    h as any));
+    buildRoutes(routes.filter(r => r.verb === 'POST'),   (path, h) => api.post(path,   h as any));
+    buildRoutes(routes.filter(r => r.verb === 'PUT'),    (path, h) => api.put(path,    h as any));
+    buildRoutes(routes.filter(r => r.verb === 'DELETE'), (path, h) => api.delete(path, h as any));
+    buildRoutes(routes.filter(r => r.verb === 'PATCH'),  (path, h) => api.patch(path,  h as any));
   }
 
   if (typeof service.scope !== 'function') {

@@ -21,3 +21,6 @@ dist/
 
 !docs/*.svg
 !docs/expediate.png
+
+# Transient benchmark run output (baseline.json IS committed)
+benchmarks/results.json

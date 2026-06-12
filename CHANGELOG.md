@@ -7,10 +7,22 @@ All notable changes to **expediate** are documented here.
 ## [1.1.0] — Unreleased
 
 ### Added
+- **API Builder v2** (see `docs/api-builder-v2-design.md`):
+  - **Controllers** — `defineController()` / `ServiceDefinition.controllers` split an API into per-domain files merged into one router and one OpenAPI document, with prefix joining, global specificity sorting, and build-time duplicate-route detection
+  - **Guards** — pre-handler hooks in the `ctx` world at API, controller, and route level (`OperationMeta.guards`); returned objects accumulate into the new `ctx.state` bag
+  - **Auth binding** — `ServiceDefinition.auth` auto-registers an `authenticate` middleware and enforces declarative `permission` requirements (`OperationMeta.permission` / controller-level) via a default check matching `jwtPlugin.requirePermission` semantics, overridable for resource-scoped models
+  - **Request validation** — `ServiceDefinition.validate` executes the JSON Schemas declared in `requestBody` metadata (subset validator, `$ref` resolved against the new `ServiceDefinition.schemas`); failures return `400` with `{ message, fieldErrors }`
+  - **Context ergonomics** — `ctx.params` (alias of `ctx.query.route`) and `ApiContext<TUser, TState>` generics
+  - **OpenAPI security output** — secured operations emit `security: [{ bearerAuth: [] }]`, an `x-required-permissions` vendor extension, and `components.securitySchemes`
 - `ErrorHandler` and `RouteInfo` types re-exported from the public API
 - `TokenPayload` and `UserRecord` types re-exported from the public API
 - `CorsOptions` type re-exported from the public API
 - `cors()` middleware documented in README
+
+### Changed
+- **Breaking:** a duplicate `(verb, path)` route pair now **throws at build time** in `apiBuilder` / `openApiSpec` (was silent shadowing)
+- **Breaking (compile-time):** `ApiContext.user` defaults to `unknown` instead of `any`
+- `ServiceDefinition.schemas` supersedes `SpecOptions.schemas` on name conflicts (the spec-options form is kept as a fallback)
 
 ### Fixed
 - Several minor fixes and test reliability improvements

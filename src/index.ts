@@ -83,6 +83,7 @@ export type {
 // ── API Service ───────────────────────────────────────────────────────────────
 import apiBuilder from './apis.js';
 export { apiBuilder }
+export { defineController } from './apis.js';
 export type {
     ApiError,
     ServiceMethod,
@@ -90,6 +91,10 @@ export type {
     ServiceMethods,
     RouteMap,
     ServiceDefinition,
+    ControllerDefinition,
+    Guard,
+    AuthBinding,
+    ValidateOptions,
     ApiRouter,
     ApiRouterExtensions,
     ApiContext,

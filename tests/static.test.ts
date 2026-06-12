@@ -1168,9 +1168,21 @@ describe('writeIndexOf — HTML escaping', () => {
   });
 
   it('escapes HTML special characters in urlPath inside <h1>', async () => {
+    // The payload must be in the PATH portion: writeIndexOf() displays
+    // req.path only ("Index of /path", Apache style) — the query string is
+    // never part of the heading.
+    const { body } = await requestListingWithPath('/path-<b>bold</b>');
+    const h1 = /<h1>(.*?)<\/h1>/.exec(body)?.[1] ?? '';
+    assert.ok(!h1.includes('<b>bold</b>'), 'raw <b> tag must not appear in heading');
+    assert.ok(h1.includes('&lt;b&gt;bold&lt;/b&gt;'), 'heading must contain escaped form');
+  });
+
+  it('query-string content is never reflected in the listing', async () => {
+    // Query parameters are only used for the validated C/O sort options;
+    // arbitrary query content must not appear in the page — raw OR escaped.
     const { body } = await requestListingWithPath('/path?x=1&y=<b>bold</b>');
-    assert.ok(!body.includes('<b>bold</b>'), 'raw <b> tag must not appear in heading');
-    assert.ok(body.includes('&lt;b&gt;bold&lt;/b&gt;'), 'heading must contain escaped form');
+    assert.ok(!body.includes('<b>bold</b>'), 'raw query content must not appear');
+    assert.ok(!body.includes('&lt;b&gt;bold&lt;/b&gt;'), 'query content must not be displayed at all');
   });
 
   it('escapes HTML special characters in file names (display text)', async () => {
