@@ -1,0 +1,68 @@
+{
+  "meta": {
+    "createdAt": "2026-06-12T11:52:27.791Z",
+    "node": "v22.22.3",
+    "config": {
+      "duration": 1,
+      "runs": 2,
+      "connections": 20,
+      "pipelining": 1
+    }
+  },
+  "results": {
+    "expediate": {
+      "hello": {
+        "requests": 85472,
+        "latencyP99": 0
+      },
+      "route-param": {
+        "requests": 82944,
+        "latencyP99": 0
+      },
+      "json-echo": {
+        "requests": 55808,
+        "latencyP99": 1
+      },
+      "middleware-chain": {
+        "requests": 84416,
+        "latencyP99": 0
+      }
+    },
+    "express": {
+      "hello": {
+        "requests": 22768,
+        "latencyP99": 2
+      },
+      "route-param": {
+        "requests": 22344,
+        "latencyP99": 2
+      },
+      "json-echo": {
+        "requests": 19008,
+        "latencyP99": 2
+      },
+      "middleware-chain": {
+        "requests": 22472,
+        "latencyP99": 2
+      }
+    },
+    "fastify": {
+      "hello": {
+        "requests": 123424,
+        "latencyP99": 0
+      },
+      "route-param": {
+        "requests": 117440,
+        "latencyP99": 0
+      },
+      "json-echo": {
+        "requests": 60416,
+        "latencyP99": 1
+      },
+      "middleware-chain": {
+        "requests": 118912,
+        "latencyP99": 0
+      }
+    }
+  }
+}

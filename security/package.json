@@ -1,0 +1,13 @@
+{
+  "name": "expediate-security",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Property-based fuzzing and security tests for expediate. Not published.",
+  "type": "module",
+  "scripts": {
+    "fuzz": "node --import tsx --test 'fuzz/*.fuzz.ts'"
+  },
+  "dependencies": {
+    "fast-check": "^3.23.0"
+  }
+}

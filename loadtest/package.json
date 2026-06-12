@@ -1,0 +1,17 @@
+{
+  "name": "expediate-loadtest",
+  "private": true,
+  "version": "0.0.0",
+  "description": "k6 load / stress / soak tests for expediate. Not published.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke": "node scripts/run-local.mjs smoke",
+    "ramp": "node scripts/run-local.mjs ramp",
+    "soak": "node scripts/run-local.mjs soak",
+    "spike": "node scripts/run-local.mjs spike"
+  },
+  "devDependencies": {
+    "@types/k6": "^0.57.0"
+  }
+}

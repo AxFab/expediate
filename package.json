@@ -35,8 +35,16 @@
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', {recursive:true,force:true})\"",
     "build": "tsc && node scripts/build-cjs.cjs",
-    "test": "node --import tsx --test 'tests/*.test.ts'"
+    "test": "node --import tsx --test 'tests/*.test.ts'",
+    "bench": "npm run bench --workspace benchmarks",
+    "bench:check": "npm run bench:check --workspace benchmarks",
+    "fuzz": "npm run fuzz --workspace security"
   },
+  "workspaces": [
+    "benchmarks",
+    "security",
+    "loadtest"
+  ],
   "homepage": "https://expediate.axfab.net/",
   "repository": {
     "type": "git",

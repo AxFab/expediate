@@ -1,0 +1,21 @@
+{
+  "name": "expediate-benchmarks",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Comparative benchmarks for expediate vs express and fastify. Not published.",
+  "type": "module",
+  "scripts": {
+    "bench": "node --import tsx run.ts",
+    "bench:baseline": "node --import tsx run.ts --write-baseline",
+    "bench:check": "node --import tsx run.ts && node --import tsx compare.ts"
+  },
+  "dependencies": {
+    "autocannon": "^8.0.0",
+    "express": "^5.1.0",
+    "fastify": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/autocannon": "^7.12.5",
+    "@types/express": "^5.0.0"
+  }
+}

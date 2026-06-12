@@ -1,0 +1,14 @@
+{
+  "//": "Type-checking only for the k6 scenario scripts (lib/ + scenarios/). These run in the k6 runtime, not Node, so they use @types/k6 and never import framework/Node code. server/ is excluded — it runs under tsx like the benchmarks server.",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["k6"]
+  },
+  "include": ["lib", "scenarios"]
+}
