@@ -1,7 +1,7 @@
 /**
  * Property-based fuzzing of static-file path traversal protection.
  *
- * Attack class covered (see ../THREAT_MODEL.md):
+ * Attack class covered (see ../docs/THREAT_MODEL.md):
  *   - FS-1 path traversal — no request path, however crafted (raw `..`,
  *     percent-encoded `%2e%2e`, encoded slashes, null bytes, backslashes,
  *     mixed depth), may cause serveStatic to read a file outside its root.
@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import fc from 'fast-check';
-import { createRouter, serveStatic } from '../../src/index.js';
+import { createRouter, serveStatic } from '../src/index.js';
 
 const MARKER = 'TOP_SECRET_MARKER_8f3a';
 

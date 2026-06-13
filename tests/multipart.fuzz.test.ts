@@ -1,7 +1,7 @@
 /**
  * Property-based fuzzing of the multipart/form-data parser.
  *
- * Attack classes covered (see ../THREAT_MODEL.md):
+ * Attack classes covered (see ../docs/THREAT_MODEL.md):
  *   - MP-1 denial of service — parseMultipartBody must terminate quickly on any
  *     adversarial byte sequence (no infinite loop, no pathological blow-up),
  *     even with malformed boundaries, missing separators, or huge part counts.
@@ -13,7 +13,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import fc from 'fast-check';
-import { parseMultipartBody } from '../../src/index.js';
+import { parseMultipartBody } from '../src/index.js';
 
 /** Time budget per parse; a hang would blow well past this. */
 const MAX_MS = 50;

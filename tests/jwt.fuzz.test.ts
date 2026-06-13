@@ -1,7 +1,7 @@
 /**
  * Property-based fuzzing of the JWT sign/verify core.
  *
- * Attack classes covered (see ../THREAT_MODEL.md):
+ * Attack classes covered (see ../docs/THREAT_MODEL.md):
  *   - JWT-1 algorithm confusion / `alg: none` — verifyToken must reject any
  *     token whose header algorithm differs from the algorithm the caller
  *     expects, regardless of payload contents.
@@ -15,7 +15,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import fc from 'fast-check';
-import { signToken, verifyToken } from '../../src/jwt-auth.js';
+import { signToken, verifyToken } from '../src/jwt-auth.js';
 
 /** Non-empty secret strings (HMAC keys). */
 const secret = fc.string({ minLength: 8, maxLength: 64 });

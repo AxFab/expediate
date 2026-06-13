@@ -1,7 +1,7 @@
 /**
  * Property-based fuzzing of the router for ReDoS / catastrophic backtracking.
  *
- * Attack class covered (see ../THREAT_MODEL.md):
+ * Attack class covered (see ../docs/THREAT_MODEL.md):
  *   - RT-1 ReDoS — matching an attacker-controlled request path against the
  *     compiled route patterns (plain segments, named params, inline `\d+`
  *     constraints, single- and cross-segment globs) must stay roughly linear:
@@ -17,7 +17,7 @@ import assert from 'node:assert';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import fc from 'fast-check';
-import { createRouter } from '../../src/index.js';
+import { createRouter } from '../src/index.js';
 
 /** Generous per-request budget; ReDoS would blow far past this. */
 const MAX_MS = 250;

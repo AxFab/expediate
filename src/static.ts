@@ -877,6 +877,7 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
       return HTTP.BAD_REQUEST(res, opts);
     }
     let pathname = originalUrl;
+    console.log('read', pathname)
 
     // When the URL ends without a trailing slash but the bare mount point was
     // requested, clear the pathname so the root directory is considered.
@@ -904,6 +905,7 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
     }
 
     fs.stat(pathname, (err, stat) => {
+      console.log('stat', pathname, err?.code)
       if (err) {
         if (
           err.code === 'ENOENT' ||
