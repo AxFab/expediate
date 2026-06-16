@@ -538,6 +538,36 @@ describe('serveStatic — malformed percent-encoding', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite 7c — serveStatic: control characters in path → 404
+// ---------------------------------------------------------------------------
+
+describe('serveStatic — control characters in path', () => {
+  it('returns 404 for a path containing a NUL byte (%00)', async () => {
+    // A NUL byte would make fs.stat() throw synchronously, previously
+    // surfacing as a 500. It must be treated as not found instead.
+    const mw = serveStatic(PUBLIC);
+    const r  = await request(mw, { path: '/hello%00.txt' });
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('returns 404 for a path containing other control characters (%01, %1f)', async () => {
+    const mw = serveStatic(PUBLIC);
+    const r1 = await request(mw, { path: '/foo%01bar' });
+    assert.equal(r1.statusCode, 404);
+    const r2 = await request(mw, { path: '/foo%1fbar' });
+    assert.equal(r2.statusCode, 404);
+  });
+
+  it('falls through on a control-char path when fallthrough is enabled', async () => {
+    const mw = serveStatic(PUBLIC, { fallthrough: true });
+    const r  = await request(mw, { path: '/hello%00.txt' });
+    // The test server's terminal next() handler responds with 404.
+    assert.equal(r.statusCode, 404);
+    assert.match(r.body, /next\(\) called/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 8 — serveStatic: directory / index.html redirect
 // ---------------------------------------------------------------------------
 

@@ -147,6 +147,15 @@ interface ResolvedOptions extends Required<Omit<StaticOptions, 'maxAge'>> {
  */
 const UP_PATH_REGEXP = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
 
+/**
+ * Regular expression that detects any ASCII control character (code point
+ * below 32, including the NUL byte). These characters cannot appear in a valid
+ * file name and would make fs.stat() throw, so paths containing them are
+ * treated as not found.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_REGEXP = /[\x00-\x1f]/;
+
 /** Default security and caching options applied to every response. */
 const DEFAULT_OPTIONS: Omit<ResolvedOptions, 'root'> = {
   headers: {
@@ -882,6 +891,16 @@ export function serveStatic(root: string, options?: StaticOptions): Middleware {
     // requested, clear the pathname so the root directory is considered.
     if (pathname === '/' && !originalUrl.endsWith('/'))
       pathname = '';
+
+    // Reject any path containing a control character (code point < 32), most
+    // notably the NUL byte. Such characters can never appear in a legitimate
+    // file name and would otherwise cause fs.stat() to throw synchronously
+    // (TypeError: path must be a string without null bytes), surfacing as a 500.
+    if (CONTROL_CHAR_REGEXP.test(pathname)) {
+      if (opts.fallthrough)
+        return next();
+      return HTTP.NOT_FOUND(res, opts);
+    }
 
     // Reject any path containing a directory-traversal component.
     if (UP_PATH_REGEXP.test(pathname))
