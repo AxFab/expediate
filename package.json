@@ -39,7 +39,10 @@
     "test:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-exclude='tests/**' 'tests/*.test.ts'",
     "fuzz": "node --import tsx --test 'tests/*.fuzz.test.ts'",
     "bench": "npm run bench --workspace benchmarks",
-    "bench:check": "npm run bench:check --workspace benchmarks"
+    "bench:check": "npm run bench:check --workspace benchmarks",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "prepack": "npm run lint && npm run test && npm pack --dry-run"
   },
   "workspaces": [
     "benchmarks",

@@ -573,6 +573,10 @@ interface RouteBuilder {
   delete(...args: MiddlewareArg[]): RouteBuilder;
   /** Register middleware for `PATCH` requests. */
   patch(...args: MiddlewareArg[]): RouteBuilder;
+  /** Register middleware for `HEAD` requests. */
+  head(...args: MiddlewareArg[]): RouteBuilder;
+  /** Register middleware for `OPTIONS` requests. */
+  options(...args: MiddlewareArg[]): RouteBuilder;
 }
 
 /**
@@ -632,6 +636,23 @@ interface Router {
   delete(path: string | RegExp, ...args: MiddlewareArg[]): void;
   /** Register middleware for `PATCH` requests. */
   patch(path: string | RegExp, ...args: MiddlewareArg[]): void;
+  /**
+   * Register middleware for `HEAD` requests.
+   *
+   * Note: `HEAD` requests are already served automatically by a matching `GET`
+   * route (with the body suppressed).  Register a `head()` handler only when
+   * you need `HEAD`-specific behaviour; if both exist, the one registered first
+   * wins.
+   */
+  head(path: string | RegExp, ...args: MiddlewareArg[]): void;
+  /**
+   * Register middleware for `OPTIONS` requests.
+   *
+   * Takes precedence over the automatic `204` + `Allow` response, which only
+   * fires when no `OPTIONS` layer (or `cors()`/`use()` middleware) handled the
+   * request.
+   */
+  options(path: string | RegExp, ...args: MiddlewareArg[]): void;
 
   /**
    * Return a {@link RouteBuilder} bound to `path` for registering several
@@ -1064,7 +1085,15 @@ function matchRouteLayer(
   req: RouterRequest,
   path: string,
 ): boolean {
-  if (layer.method && layer.method !== req.method) return false;
+  // A HEAD request is served by a matching GET layer (RFC 7231 §4.3.2); Node
+  // suppresses the response body for HEAD automatically, so the GET handler can
+  // run unchanged.
+  if (
+    layer.method &&
+    layer.method !== req.method &&
+    !(req.method === 'HEAD' && layer.method === 'GET')
+  )
+    return false;
 
   const m = layer.regex.exec(path);
   if (m === null) return false;
@@ -1867,8 +1896,21 @@ function createRouter(
 
       // All layers exhausted without a full match.
       if (allowedMethods.size > 0) {
-        // Path is registered, but not for this method.
+        // The path is registered, just not for this method.  Build the Allow
+        // header, advertising HEAD (served by GET) and OPTIONS (handled here)
+        // alongside the explicitly registered methods.
+        if (allowedMethods.has('GET')) allowedMethods.add('HEAD');
+        allowedMethods.add('OPTIONS');
         const allow = [...allowedMethods].sort().join(', ');
+
+        // Automatic OPTIONS: when nothing claimed the request (no explicit
+        // OPTIONS route, no cors() middleware), reply 204 with the Allow header.
+        if (method === 'OPTIONS') {
+          res.status(204, { Allow: allow }).end();
+          return;
+        }
+
+        // Otherwise the method is genuinely not allowed for this path.
         res.status(405, { Allow: allow }).end(`Cannot ${method} ${url}`);
         return;
       }
@@ -1949,20 +1991,24 @@ function createRouter(
     get:    makeRegister('GET',    false),
     put:    makeRegister('PUT',    false),
     post:   makeRegister('POST',   false),
-    delete: makeRegister('DELETE', false),
-    patch:  makeRegister('PATCH',  false),
+    delete:  makeRegister('DELETE',  false),
+    patch:   makeRegister('PATCH',   false),
+    head:    makeRegister('HEAD',    false),
+    options: makeRegister('OPTIONS', false),
 
     // ── route ────────────────────────────────────────────────────────────────
     route(path: string | RegExp): RouteBuilder {
       // Each method forwards to the router's own registration helper with the
       // cached path and returns the builder so calls can be chained.
       const builder: RouteBuilder = {
-        all(...args)    { router.all(path, ...args);    return builder; },
-        get(...args)    { router.get(path, ...args);    return builder; },
-        put(...args)    { router.put(path, ...args);    return builder; },
-        post(...args)   { router.post(path, ...args);   return builder; },
-        delete(...args) { router.delete(path, ...args); return builder; },
-        patch(...args)  { router.patch(path, ...args);  return builder; },
+        all(...args)     { router.all(path, ...args);     return builder; },
+        get(...args)     { router.get(path, ...args);     return builder; },
+        put(...args)     { router.put(path, ...args);     return builder; },
+        post(...args)    { router.post(path, ...args);    return builder; },
+        delete(...args)  { router.delete(path, ...args);  return builder; },
+        patch(...args)   { router.patch(path, ...args);   return builder; },
+        head(...args)    { router.head(path, ...args);    return builder; },
+        options(...args) { router.options(path, ...args); return builder; },
       };
       return builder;
     },

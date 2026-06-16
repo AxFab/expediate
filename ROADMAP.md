@@ -61,8 +61,12 @@ Tasks:
   Express aliases intentionally skipped — redundant with `req.headers` and
   Node's `res.setHeader`/`getHeader`; not aiming for a drop-in Express clone.)
 - [x] Add `router.route(path).get(...).post(...)`.
-- [ ] Decide and document `HEAD`, `OPTIONS`, and automatic `405` behavior
-  (router currently falls through to `404` on a method mismatch).
+- [x] Decide and document `HEAD`, `OPTIONS`, and automatic `405` behavior.
+  `HEAD` is served by the matching `GET` handler (Node strips the body);
+  unhandled `OPTIONS` on a registered path replies `204` with an `Allow`
+  header; a method mismatch on a registered path returns `405` with `Allow`
+  (both advertise `HEAD` when a `GET` exists, plus `OPTIONS`). Explicit
+  `use()`/`all()` handlers and `cors()` still take precedence. No toggles.
 
 ## Milestone 3 - Error And Middleware Model
 
@@ -121,7 +125,7 @@ Tasks:
   (`static-traversal.fuzz`), multipart (`multipart.fuzz`), JWT (`jwt.fuzz`),
   ReDoS (`router-redos.fuzz`). Still missing: cookies, CORS, CSRF, and
   request-smuggling-adjacent cases.
-- [ ] Add package smoke tests for ESM import, CJS require, declarations, and
+- [x] Add package smoke tests for ESM import, CJS require, declarations, and
   `npm pack --dry-run`.
 - [ ] Add CI matrix across supported Node versions (workflows currently pin a
   single version, Node 22).

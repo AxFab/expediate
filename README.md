@@ -117,6 +117,8 @@ app.route('/users/:id')
 
 Each call forwards to the matching method (`get`, `post`, …) with the cached path and returns the builder, so behaviour is identical to calling those methods directly.
 
+**Method handling.** `HEAD` requests are served by the matching `GET` handler (Node strips the response body). An unhandled `OPTIONS` request on a registered path automatically returns `204 No Content` with an `Allow` header, and a method mismatch on a registered path returns `405 Method Not Allowed` with `Allow` (both list `HEAD` when a `GET` exists, plus `OPTIONS`). Register `app.head(path, …)` or `app.options(path, …)` (also on the `route()` builder) for method-specific handlers; explicit handlers and `cors()` run first, so they override these defaults.
+
 ### Path patterns
 
 ```ts

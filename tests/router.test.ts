@@ -621,6 +621,100 @@ describe('HTTP method filtering', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite — automatic HEAD / OPTIONS / 405 handling
+// ---------------------------------------------------------------------------
+
+describe('automatic HEAD / OPTIONS / 405 handling', () => {
+  it('HEAD is served by the matching GET handler with an empty body', async () => {
+    const router = createRouter();
+    let handlerRan = false;
+    router.get('/page', (_req, res) => { handlerRan = true; res.status(200).end('full body'); });
+
+    const r = await makeRequest(router, { method: 'HEAD', url: '/page' });
+    assert.ok(handlerRan, 'the GET handler should run for a HEAD request');
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, '', 'HEAD response must have no body');
+  });
+
+  it('HEAD on a path with no GET route is 405 and Allow omits HEAD', async () => {
+    const router = createRouter();
+    router.post('/only-post', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'HEAD', url: '/only-post' });
+    assert.equal(r.statusCode, 405);
+    const allow = (r.headers['allow'] as string ?? '').split(',').map((m) => m.trim());
+    assert.ok(allow.includes('POST'));
+    assert.ok(!allow.includes('HEAD'), `HEAD should not be advertised without a GET route: ${r.headers['allow']}`);
+  });
+
+  it('OPTIONS on a registered path replies 204 with an enriched Allow header', async () => {
+    const router = createRouter();
+    router.get('/res',  (_req, res) => res.end('ok'));
+    router.post('/res', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'OPTIONS', url: '/res' });
+    assert.equal(r.statusCode, 204);
+    assert.equal(r.body, '');
+    const allow = (r.headers['allow'] as string ?? '').split(',').map((m) => m.trim()).sort();
+    assert.deepEqual(allow, ['GET', 'HEAD', 'OPTIONS', 'POST']);
+  });
+
+  it('the 405 Allow header advertises HEAD (when GET exists) and OPTIONS', async () => {
+    const router = createRouter();
+    router.get('/r', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'DELETE', url: '/r' });
+    assert.equal(r.statusCode, 405);
+    const allow = (r.headers['allow'] as string ?? '').split(',').map((m) => m.trim()).sort();
+    assert.deepEqual(allow, ['GET', 'HEAD', 'OPTIONS']);
+  });
+
+  it('a custom OPTIONS handler takes precedence over the automatic 204', async () => {
+    const router = createRouter();
+    router.use('/custom', (req, res, next) => {
+      if (req.method === 'OPTIONS') return void res.status(200).end('custom');
+      next();
+    });
+    router.get('/custom', (_req, res) => res.end('ok'));
+
+    const r = await makeRequest(router, { method: 'OPTIONS', url: '/custom' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'custom');
+  });
+
+  it('OPTIONS on an unregistered path is still 404', async () => {
+    const router = createRouter();
+    router.get('/known', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'OPTIONS', url: '/unknown' });
+    assert.equal(r.statusCode, 404);
+  });
+
+  it('an explicit options() handler runs instead of the automatic 204', async () => {
+    const router = createRouter();
+    router.options('/res', (_req, res) => res.status(200).end('explicit-options'));
+    router.get('/res', (_req, res) => res.end('ok'));
+
+    const r = await makeRequestNoDone(router, { method: 'OPTIONS', url: '/res' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, 'explicit-options');
+  });
+
+  it('an explicit head() handler runs for HEAD requests', async () => {
+    const router = createRouter();
+    let ranHead = false;
+    router.head('/res', (_req, res) => { ranHead = true; res.status(200).header('X-Head', '1').end(); });
+    router.get('/res',  (_req, res) => res.status(200).end('get-body'));
+
+    const r = await makeRequest(router, { method: 'HEAD', url: '/res' });
+    assert.ok(ranHead, 'the explicit HEAD handler should run');
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.headers['x-head'], '1');
+    assert.equal(r.body, '');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 5 — Middleware chain & next()
 // ---------------------------------------------------------------------------
 
@@ -3032,6 +3126,21 @@ describe('router.route(path) — fluent route builder', () => {
         { method: 'POST', path: '/users' },
       ],
     );
+  });
+
+  it('supports head() and options() on the builder', async () => {
+    const router = createRouter();
+    let ranHead = false;
+    router.route('/r')
+      .head((_req, res) => { ranHead = true; res.status(200).end(); })
+      .options((_req, res) => res.status(200).end('opt'));
+
+    const head = await makeRequest(router, { url: '/r', method: 'HEAD' });
+    const opt  = await makeRequest(router, { url: '/r', method: 'OPTIONS' });
+    assert.ok(ranHead);
+    assert.equal(head.statusCode, 200);
+    assert.equal(opt.statusCode, 200);
+    assert.equal(opt.body, 'opt');
   });
 });
 

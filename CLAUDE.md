@@ -749,7 +749,7 @@ containing `'LOST'`.
 
 | Test file             | Test suites                                                             |
 |-----------------------|-------------------------------------------------------------------------|
-| `router.test.ts`      | compilePlainPath (incl. inline constraints), compileGlob, RegExp, methods, chain, sub-router, URL parsing, cookies, response helpers, registerRoute errors, edge cases |
+| `router.test.ts`      | compilePlainPath (incl. inline constraints), compileGlob, RegExp, methods, HEAD/OPTIONS/405 handling, chain, sub-router, URL parsing, cookies, response helpers, registerRoute errors, edge cases |
 | `misc.test.ts`        | json(), formData(), formEncoded(), parseBody(), streamFormData(), readSize (via limit), logger(), chunked transfer, strict mode |
 | `middleware.test.ts`  | compress(), requestId(), rateLimit(), cacheControl(), csrf(), securityHeaders(), conditionalGet() |
 | `apis.test.ts`        | singleton/keyed/ephemeral, buildModule, return conventions, error handling, route params, HTTP verbs, multiple routes, async setup, ctx.params alias, controllers (prefix joining, global sort, duplicate throw, shared instance) |
@@ -759,11 +759,28 @@ containing `'LOST'`.
 | `git.test.ts`         | factory validation, pktLine, GET /info/refs, POST /git-upload-pack, repository callback, options (strict/timeout/gitPath), unrecognised routes |
 | `openapi.test.ts`     | describe(), openApiSpec(), serializeSpec(), YAML output, path parameters, request/response schemas, merged controller specs, security emission (bearerAuth, x-required-permissions), ServiceDefinition.schemas precedence |
 
-### Known test quirk
+### Method handling: HEAD / OPTIONS / 405
 
-In `router.test.ts` there is a comment: `// 400 Or 404, wierd thing going on here` for the case where a wrong HTTP method is used. The router falls through to a
-404 when no route matches — it does NOT return 405. This is a deliberate (if
-imperfect) design.
+The dispatch loop in `createRouter()`'s `listener` resolves method semantics
+after all layers are exhausted (see the `allowedMethods` set):
+
+- **HEAD** is served by the matching **GET** layer — `matchRouteLayer()` treats
+  a `HEAD` request as matching a `GET` route. The handler runs unchanged and
+  Node suppresses the body for HEAD responses (`res._hasBody = false`).
+- **OPTIONS** on a registered path that no layer handled gets an automatic
+  **204 No Content** with an `Allow` header.
+- A **method mismatch** on a registered path returns **405 Method Not Allowed**
+  with an `Allow` header. (A path that matches no layer at all is a genuine
+  **404**.)
+- Both the 405 and auto-OPTIONS `Allow` headers advertise `HEAD` (when a `GET`
+  layer exists) and `OPTIONS` alongside the explicitly registered methods.
+- Explicit `use()`/`all()`/`options()` handlers and `cors()` are ordinary
+  layers, so they run first and take precedence over the automatic OPTIONS/405
+  fallbacks.
+- `head()` and `options()` registration helpers exist for method-specific
+  handlers (`makeRegister('HEAD'/'OPTIONS', false)`). An explicit `head()` wins
+  over the GET→HEAD fallback when registered first; an explicit `options()`
+  wins over the automatic 204.
 
 ---
 
