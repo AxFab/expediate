@@ -145,6 +145,7 @@ Every request is augmented before middleware runs:
 | `req.json()` | Parse body as JSON (Promise) |
 | `req.text()` | Read body as text (Promise) |
 | `req.formData()` | Parse body as multipart (Promise) |
+| `req.header(name)` | Read a request header by name (case-insensitive) |
 
 The `req.json()`, `req.text()`, and `req.formData()` helpers accept the same `BodyOptions` as the parser middleware, including `limit`, `inflate`, and the `verify` hook (a throw rejects the returned promise with the error's `status`, default `403`).
 
@@ -162,6 +163,7 @@ res.clearCookie('session');          // Max-Age=0 + Expires=epoch
 res.download('/path/file.pdf');      // Content-Disposition: attachment
 res.attachment('report.pdf').send(buf); // set disposition + Content-Type
 res.sendStatus(200);                 // status + standard text body
+res.header('Cache-Control', 'no-store'); // set a header (replaces)
 res.append('X-Custom', 'v1');        // append to header
 res.vary('Accept');                  // add to Vary header
 res.location('/new-path');           // set Location

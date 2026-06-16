@@ -178,6 +178,7 @@ Fields added to `req`:
 - `json(opts)` — Promise-based JSON body reader (uses `readReqBody` from misc.ts)
 - `text(opts)` — Promise-based plain-text body reader
 - `formData(opts)` — Promise-based multipart/form-data body reader
+- `header(name)` — reads a request header (case-insensitive; `referer`/`referrer` treated as equivalent)
 
 Fields added to `res`:
 - `send(data?)` — writes data and calls `res.end()`
@@ -188,6 +189,7 @@ Fields added to `res`:
 - `download(filepath, filename?)` — sets `Content-Disposition: attachment` then streams the file
 - `type(mime)` — sets `Content-Type` header, **returns `this`** for chaining
 - `etag(value, strong?)` — sets `ETag` header (`W/"value"` weak by default, `"value"` when `strong=true`), **returns `this`** for chaining
+- `header(field, value)` — sets a response header (chainable wrapper over `setHeader`), **returns `this`** for chaining
 
 The `X-Powered-By: Expediate` header is set on every response in `updateHttpObjects`.
 
@@ -702,6 +704,10 @@ Node.js built-in `node:test` (no external framework). Run with:
 node --import tsx --test 'tests/*.test.ts'
 ```
 
+Coverage uses Node's native instrumentation (no nyc/c8) via `npm run test:coverage`
+(`--experimental-test-coverage --test-coverage-exclude='tests/**'`), so the
+report covers `src/` only.
+
 ### Custom `describe`/`it` shim
 
 All test files use a shared pattern:
@@ -917,6 +923,9 @@ npm run clean
 
 # Run all tests
 npm test
+
+# Run all tests with native coverage (src/ only)
+npm run test:coverage
 
 # Run specific test file (no build needed — tsx handles it)
 node --import tsx --test tests/router.test.ts

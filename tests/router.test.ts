@@ -3034,3 +3034,67 @@ describe('router.route(path) — fluent route builder', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Suite — req.header()
+// ---------------------------------------------------------------------------
+
+describe('req.header() — read a request header by name', () => {
+  it('returns the header value, case-insensitively', async () => {
+    const router = createRouter();
+    router.get('/', (req, res) => res.status(200).end(req.header('X-Custom') as string ?? '(none)'));
+    const r = await makeRequest(router, { url: '/', headers: { 'X-Custom': 'hello' } });
+    assert.equal(r.body, 'hello');
+  });
+
+  it('returns undefined for an absent header', async () => {
+    const router = createRouter();
+    router.get('/', (req, res) => res.status(200).end(String(req.header('X-Absent') === undefined)));
+    const r = await makeRequest(router, { url: '/' });
+    assert.equal(r.body, 'true');
+  });
+
+  it('treats referer and referrer as equivalent', async () => {
+    const router = createRouter();
+    router.get('/', (req, res) => res.status(200).end(req.header('Referrer') as string ?? '(none)'));
+    const r = await makeRequest(router, { url: '/', headers: { Referer: 'http://example.test/' } });
+    assert.equal(r.body, 'http://example.test/');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — res.header()
+// ---------------------------------------------------------------------------
+
+describe('res.header() — set a response header', () => {
+  it('sets a response header and returns this for chaining', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => {
+      const ret = res.header('X-Foo', 'bar');
+      assert.strictEqual(ret, res, 'header() must return the response for chaining');
+      res.status(200).end('ok');
+    });
+    const r = await makeRequest(router, { url: '/' });
+    assert.equal(r.headers['x-foo'], 'bar');
+  });
+
+  it('replaces an existing value (unlike append)', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => {
+      res.header('X-Once', 'first').header('X-Once', 'second');
+      res.status(200).end('ok');
+    });
+    const r = await makeRequest(router, { url: '/' });
+    assert.equal(r.headers['x-once'], 'second');
+  });
+
+  it('supports multi-value headers via an array', async () => {
+    const router = createRouter();
+    router.get('/', (_req, res) => {
+      res.header('Set-Cookie', ['a=1', 'b=2']);
+      res.status(200).end('ok');
+    });
+    const r = await makeRequest(router, { url: '/' });
+    assert.deepEqual(r.headers['set-cookie'], ['a=1', 'b=2']);
+  });
+});

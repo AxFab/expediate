@@ -34,9 +34,9 @@ Tasks:
 - [x] Reset or reject global/sticky user RegExp route patterns.
 - [x] Reject control characters (code point < 32, incl. NUL byte) in
   `serveStatic()` paths with `404` instead of letting `fs.stat()` throw a `500`.
-- [ ] Add `test:coverage` script using Node's native test coverage
-  (`--experimental-test-coverage`). Coverage currently runs only ad hoc; the
-  baseline is ~99% lines / ~92% branches.
+- [x] Add `test:coverage` script using Node's native test coverage
+  (`--experimental-test-coverage`, excluding `tests/**`). Baseline is ~99%
+  lines / ~89% branches across `src/`.
 
 ## Milestone 2 - Express Migration Ergonomics
 
@@ -57,8 +57,9 @@ Tasks:
   `res.sendStatus()`, `res.attachment()`, and `res.locals`.
 - [x] Validate `res.status()` codes as integers in the `100..999` range.
 
-- [ ] Add `req.get()` / `req.header()`.
-- [ ] Add `res.set()` / `res.header()` and `res.get()`.
+- [x] Add `req.header()` and `res.header()`. (`req.get`/`res.set`/`res.get`
+  Express aliases intentionally skipped — redundant with `req.headers` and
+  Node's `res.setHeader`/`getHeader`; not aiming for a drop-in Express clone.)
 - [x] Add `router.route(path).get(...).post(...)`.
 - [ ] Decide and document `HEAD`, `OPTIONS`, and automatic `405` behavior
   (router currently falls through to `404` on a method mismatch).

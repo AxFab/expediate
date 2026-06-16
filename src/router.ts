@@ -219,6 +219,24 @@ interface RouterRequest extends http.IncomingMessage {
    * errors.
    */
   formData(opts?: BodyOptions): Promise<FormPart[] | null>;
+
+  /**
+   * Return the value of a request header by name (case-insensitive).
+   *
+   * A thin convenience over `req.headers`: the lookup is lowercased, and the
+   * `Referer`/`Referrer` spelling variants are treated as equivalent. Returns
+   * `undefined` when the header is absent.
+   *
+   * @param name - The header name (any case).
+   * @returns The header value (`string`, or `string[]` for repeated headers
+   *          like `Set-Cookie`), or `undefined`.
+   *
+   * @example
+   * ```ts
+   * const ua = req.header('User-Agent');
+   * ```
+   */
+  header(name: string): string | string[] | undefined;
 }
 
 /**
@@ -311,6 +329,23 @@ interface RouterResponse extends http.ServerResponse {
    * ```
    */
   etag(value: string, strong?: boolean): this;
+
+  /**
+   * Set a response header to `value`, replacing any existing value.
+   * A chainable wrapper over the native `res.setHeader()`, consistent with the
+   * other `res.*` helpers (and matching Fastify's `reply.header()`).
+   * Returns `this` for chaining.
+   *
+   * @param field - The header name.
+   * @param value - The header value (`string`, or `string[]` for multi-value
+   *                headers like `Set-Cookie`).
+   *
+   * @example
+   * ```ts
+   * res.header('Cache-Control', 'no-store').json(data);
+   * ```
+   */
+  header(field: string, value: string | number | string[]): this;
 
   /**
    * Append a value to a response header, creating it if it does not exist.
@@ -1344,6 +1379,14 @@ function updateHttpObjects(
       });
   };
 
+  rReq.header = (name: string): string | string[] | undefined => {
+    const key = name.toLowerCase();
+    // Express treats the two spellings of the referer header as equivalent.
+    if (key === 'referer' || key === 'referrer')
+      return req.headers.referer ?? req.headers.referrer;
+    return req.headers[key];
+  };
+
   rRes.setHeader('X-Powered-By', 'Expediate');
 
   rRes.send = (data?: string): void => {
@@ -1452,6 +1495,11 @@ function updateHttpObjects(
   };
 
   rRes.locals = {};
+
+  rRes.header = (field: string, value: string | number | string[]): typeof rRes => {
+    res.setHeader(field, value);
+    return rRes;
+  };
 
   rRes.append = (field: string, value: string | string[]): typeof rRes => {
     const existing = res.getHeader(field);

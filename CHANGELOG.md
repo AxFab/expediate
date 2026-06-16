@@ -16,6 +16,7 @@ All notable changes to **expediate** are documented here.
   - **OpenAPI security output** — secured operations emit `security: [{ bearerAuth: [] }]`, an `x-required-permissions` vendor extension, and `components.securitySchemes`
 - **Body parsing** — `raw()` (body as `Buffer`) and `text()` (body as `string`) middleware; Brotli (`br`) request decompression alongside gzip/deflate; new `type` option (string / `string[]` / predicate, with `*` wildcards) to control which requests a parser handles, and a `verify(req, res, buf, encoding)` hook run on the raw body before parsing (throw to reject)
 - **Routing** — `router.route(path)` fluent builder for registering several HTTP methods against one path
+- **Headers** — `req.header(name)` (case-insensitive request-header lookup, `referer`/`referrer` equivalent) and chainable `res.header(field, value)`
 - **Cookies** — `res.cookie()` now percent-encodes values (after any `j:`/`s:` wrapping) so semicolons, commas, spaces, quotes, and backslashes transmit safely; cookie parsing de-quotes (RFC 6265 quoted-string) and percent-decodes values before interpreting `j:`/`s:` prefixes. Signed-cookie HMAC remains computed over the unencoded value
 - `ErrorHandler` and `RouteInfo` types re-exported from the public API
 - `TokenPayload` and `UserRecord` types re-exported from the public API
