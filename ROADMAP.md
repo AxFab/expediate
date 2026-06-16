@@ -93,7 +93,7 @@ Tasks:
 - [x] Add exported `text()` middleware.
 - [x] Add Brotli request decompression.
 - [x] Add parser `type` option and optional verify hook.
-- [ ] Improve cookie encoding/decoding for semicolons, quotes, spaces, and
+- [x] Improve cookie encoding/decoding for semicolons, quotes, spaces, and
   percent-encoded values.
 - [ ] Consider byte-range support for `serveStatic()`, `serveFile()`, and
   `res.download()`.

@@ -193,8 +193,8 @@ The `X-Powered-By: Expediate` header is set on every response in `updateHttpObje
 
 ### Cookie helpers
 
-- Cookie **reading**: `j:` prefixed values are JSON-parsed. `s:` prefixed values are HMAC-SHA256 verified against the router secret when `secret` is configured in `createRouter()`; cookies that fail verification are silently dropped.
-- Cookie **writing**: objects get `j:` prefix. `opts.signed = true` triggers HMAC-SHA256 signing (requires `secret` on the router).
+- Cookie **reading**: each value is first de-quoted (RFC 6265 quoted-string) and percent-decoded (`decodeCookieValue`, falls back to the raw string on malformed `%`-sequences). Then `j:` prefixed values are JSON-parsed and `s:` prefixed values are HMAC-SHA256 verified against the router secret when `secret` is configured in `createRouter()`; cookies that fail verification are silently dropped.
+- Cookie **writing**: objects get `j:` prefix. `opts.signed = true` triggers HMAC-SHA256 signing (requires `secret` on the router). The final value (after any `j:`/`s:` wrapping) is percent-encoded with `encodeCookieValue` so semicolons, commas, spaces, quotes, and backslashes transmit safely; the HMAC is computed over the unencoded value, keeping sign/verify symmetric.
 
 ### Error handling in `listener`
 

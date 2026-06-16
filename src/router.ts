@@ -1070,6 +1070,42 @@ function decodeJsonCookie(raw: string): unknown {
 }
 
 /**
+ * Percent-encode a cookie value for safe transport in a `Set-Cookie` header.
+ *
+ * RFC 6265 forbids whitespace, double quotes, commas, semicolons, and
+ * backslashes in a bare cookie value.  `encodeURIComponent` escapes all of
+ * these (and the `:` / `{` / `}` / `"` produced by the `s:` and `j:` wire
+ * formats), and {@link decodeCookieValue} reverses it on the way in.
+ *
+ * @param value - The raw cookie value (may include an `s:`/`j:` prefix).
+ * @returns The percent-encoded value.
+ */
+function encodeCookieValue(value: string): string {
+  return encodeURIComponent(value);
+}
+
+/**
+ * Decode a raw cookie value taken from a `Cookie` request header.
+ *
+ * Strips an optional surrounding double-quoted form (RFC 6265 quoted-string),
+ * then percent-decodes the result.  Malformed percent-sequences fall back to
+ * the (de-quoted) raw string so a single bad cookie never throws.
+ *
+ * @param raw - The raw value as it appears after `=` in the header.
+ * @returns The decoded value, ready for `s:`/`j:` interpretation.
+ */
+function decodeCookieValue(raw: string): string {
+  let val = raw;
+  if (val.length >= 2 && val.charCodeAt(0) === 0x22 && val.charCodeAt(val.length - 1) === 0x22)
+    val = val.slice(1, -1); // strip surrounding double quotes
+  try {
+    return decodeURIComponent(val);
+  } catch {
+    return val; // malformed percent-encoding — use the raw (de-quoted) string
+  }
+}
+
+/**
  * Sign a cookie value with HMAC-SHA256.
  *
  * The produced string follows the `cookie-signature` wire format:
@@ -1224,7 +1260,9 @@ function updateHttpObjects(
         const eqIdx = part.indexOf('=');
         if (eqIdx === -1) continue;
         const name   = part.slice(0, eqIdx).trim();
-        const rawVal = part.slice(eqIdx + 1).trim();
+        // De-quote and percent-decode before interpreting s:/j: prefixes, so
+        // values containing semicolons, commas, quotes, or spaces round-trip.
+        const rawVal = decodeCookieValue(part.slice(eqIdx + 1).trim());
 
         if (rawVal.startsWith('s:')) {
           // Signed cookie — verify the HMAC signature.
@@ -1352,7 +1390,9 @@ function updateHttpObjects(
       val = signCookieValue(val, secret);
     }
 
-    let txt = `${name}=${val}`;
+    // Percent-encode the final value (after any j:/s: wrapping) so special
+    // characters are transmitted safely; decodeCookieValue() reverses it.
+    let txt = `${name}=${encodeCookieValue(val)}`;
 
     if (opts.maxAge != null) {
       const maxAgeMs  = opts.maxAge;

@@ -1079,8 +1079,10 @@ describe('Response helpers', () => {
       const r = await makeRequest(router, { url: '/set' });
       const sc = r.headers['set-cookie'];
       const cookie = Array.isArray(sc) ? sc[0] : sc;
-      assert.ok(cookie?.includes('j:'), `Expected j: prefix in: ${cookie}`);
-      assert.ok(cookie?.includes('role'), `Expected JSON content in: ${cookie}`);
+      // The wire value is percent-encoded; decode the name=value pair first.
+      const pair = decodeURIComponent((cookie ?? '').split(';')[0]);
+      assert.ok(pair.includes('j:'), `Expected j: prefix in: ${pair}`);
+      assert.ok(pair.includes('role'), `Expected JSON content in: ${pair}`);
     });
 
     it('multiple res.cookie() calls produce multiple Set-Cookie headers (FIX-01)', async () => {
@@ -1208,7 +1210,9 @@ describe('Cookie encoding and decoding (FIX-05 + FIX-06)', () => {
       const sc = r.headers['set-cookie'];
       const cookie = Array.isArray(sc) ? sc[0] : sc ?? '';
       const val = cookie.split(';')[0].split('=').slice(1).join('=');
-      assert.ok(val.startsWith('s:'), `Expected s: prefix, got: ${val}`);
+      // The wire value is percent-encoded (e.g. "s%3A..."); decode before
+      // checking the s: prefix.
+      assert.ok(decodeURIComponent(val).startsWith('s:'), `Expected s: prefix, got: ${val}`);
     });
 
     it('signed cookie round-trip: written value is readable via req.cookies', async () => {
@@ -1330,6 +1334,68 @@ describe('Cookie encoding and decoding (FIX-05 + FIX-06)', () => {
       const r = await makeRequest(router, { url: '/set' });
       const sc = (Array.isArray(r.headers['set-cookie']) ? r.headers['set-cookie'][0] : r.headers['set-cookie']) ?? '';
       assert.ok(sc.includes('SameSite=Strict'), `Expected SameSite=Strict in: ${sc}`);
+    });
+  });
+
+  // ── Special-character encoding/decoding ─────────────────────────────────
+
+  describe('special character round-trip (semicolons, quotes, spaces, percent)', () => {
+    /** Write `value` via res.cookie(), then read it back via req.cookies. */
+    async function roundTrip(value: string, opts?: { secret?: string; signed?: boolean }): Promise<{ wire: string; readBack: unknown }> {
+      const router = createRouter(opts?.secret ? { secret: opts.secret } : undefined);
+      let readBack: unknown;
+      router.get('/set',  (_req, res) => res.cookie('c', value, { signed: opts?.signed }).send('ok'));
+      router.get('/read', (req,  res) => { readBack = req.cookies['c']; res.send('ok'); });
+
+      const setResp = await makeRequest(router, { url: '/set' });
+      const sc = setResp.headers['set-cookie'];
+      const wire = ((Array.isArray(sc) ? sc[0] : sc) ?? '').split(';')[0].trim();
+
+      await makeRequest(router, { url: '/read', headers: { cookie: wire } });
+      return { wire, readBack };
+    }
+
+    it('round-trips a value containing semicolons', async () => {
+      const { wire, readBack } = await roundTrip('a=1; b=2; c=3');
+      assert.ok(!wire.slice(wire.indexOf('=') + 1).includes(';'), 'semicolons must be encoded on the wire');
+      assert.equal(readBack, 'a=1; b=2; c=3');
+    });
+
+    it('round-trips a value containing spaces and double quotes', async () => {
+      const { wire, readBack } = await roundTrip('he said "hi there"');
+      assert.ok(!/[ "]/.test(wire.slice(wire.indexOf('=') + 1)), 'spaces/quotes must be encoded on the wire');
+      assert.equal(readBack, 'he said "hi there"');
+    });
+
+    it('round-trips a value containing commas', async () => {
+      const { readBack } = await roundTrip('red,green,blue');
+      assert.equal(readBack, 'red,green,blue');
+    });
+
+    it('round-trips a value that already contains a percent sign', async () => {
+      const { readBack } = await roundTrip('100%_done');
+      assert.equal(readBack, '100%_done');
+    });
+
+    it('round-trips special characters in a signed cookie', async () => {
+      const { readBack } = await roundTrip('a; b="c"', { secret: 'sekret', signed: true });
+      assert.equal(readBack, 'a; b="c"');
+    });
+
+    it('strips a surrounding RFC 6265 quoted-string on read', async () => {
+      const router = createRouter();
+      let captured: unknown;
+      router.get('/read', (req, res) => { captured = req.cookies['q']; res.send('ok'); });
+      await makeRequest(router, { url: '/read', headers: { cookie: 'q="quoted value"' } });
+      assert.equal(captured, 'quoted value');
+    });
+
+    it('percent-decodes an externally percent-encoded value on read', async () => {
+      const router = createRouter();
+      let captured: unknown;
+      router.get('/read', (req, res) => { captured = req.cookies['p']; res.send('ok'); });
+      await makeRequest(router, { url: '/read', headers: { cookie: 'p=a%20b%3Bc' } });
+      assert.equal(captured, 'a b;c');
     });
   });
 });

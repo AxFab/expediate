@@ -157,7 +157,7 @@ res.status(201).send('Created');     // set status code (integer 100–999)
 res.redirect('/new-url');            // 302 Found
 res.type('text/csv').send(data);     // set Content-Type
 res.etag('v1').json(payload);        // weak ETag W/"v1"
-res.cookie('session', 'abc', { ... }); // Set-Cookie
+res.cookie('session', 'abc', { ... }); // Set-Cookie (value percent-encoded)
 res.clearCookie('session');          // Max-Age=0 + Expires=epoch
 res.download('/path/file.pdf');      // Content-Disposition: attachment
 res.attachment('report.pdf').send(buf); // set disposition + Content-Type
