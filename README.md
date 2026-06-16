@@ -106,6 +106,17 @@ app.use('/api',          apiRouter);         // prefix mount — strips /api fro
 
 `use()` strips the matched prefix from `req.path` and sets `req.baseUrl` for nested routers. Method routes (`get`, `post`, etc.) use **endpoint matching** — `get('/users')` matches `/users` but not `/users/42`.
 
+To register several methods against one path without repeating it, use the chainable `route()` builder:
+
+```ts
+app.route('/users/:id')
+  .get(getUser)
+  .put(replaceUser)
+  .delete(removeUser);
+```
+
+Each call forwards to the matching method (`get`, `post`, …) with the cached path and returns the builder, so behaviour is identical to calling those methods directly.
+
 ### Path patterns
 
 ```ts
@@ -134,6 +145,8 @@ Every request is augmented before middleware runs:
 | `req.json()` | Parse body as JSON (Promise) |
 | `req.text()` | Read body as text (Promise) |
 | `req.formData()` | Parse body as multipart (Promise) |
+
+The `req.json()`, `req.text()`, and `req.formData()` helpers accept the same `BodyOptions` as the parser middleware, including `limit`, `inflate`, and the `verify` hook (a throw rejects the returned promise with the error's `status`, default `403`).
 
 ### Response helpers
 
@@ -190,14 +203,30 @@ process.on('SIGTERM', () => app.shutdown(10_000));
 Typed parsers call `next()` when the request content-type does not match, so it is safe to stack them globally:
 
 ```ts
-import { json, formData, formEncoded, parseBody } from 'expediate';
+import { json, formData, formEncoded, raw, text, parseBody } from 'expediate';
 
 app.use(json());        // application/json → req.body
 app.use(formEncoded()); // application/x-www-form-urlencoded → req.body
 app.use(formData());    // multipart/form-data → req.body as FormPart[]
+app.use(text());        // text/plain → req.body as string
+app.use(raw());         // application/octet-stream → req.body as Buffer
 
 // Or catch everything at once (415 for unsupported types)
 app.use(parseBody());
+```
+
+Request bodies encoded with `gzip`, `deflate`, or `br` (Brotli) are decompressed automatically (disable with `inflate: false`).
+
+Override which requests a parser handles with `type`, and inspect the raw bytes before parsing with `verify` (throw to reject — handy for webhook signature checks):
+
+```ts
+app.post('/webhook',
+  json({
+    type:   'application/*',                // string, string[], or (req) => boolean
+    verify: (req, res, buf) => verifySignature(req, buf), // throw → 403 (or err.status)
+  }),
+  handler,
+);
 ```
 
 Streaming multipart:
@@ -216,8 +245,10 @@ app.post('/upload', async (req, res) => {
 | Option | Default | Description |
 |---|---|---|
 | `limit` | `'100kb'` | Maximum body size |
-| `inflate` | `true` | Accept gzip/deflate encoded bodies |
+| `inflate` | `true` | Accept gzip/deflate/br encoded bodies |
 | `reviver` | `null` | JSON.parse reviver |
+| `type` | per parser | Content-type matcher: string, string[], or `(req) => boolean` (supports `*` wildcards) |
+| `verify` | `null` | Hook `(req, res, buf, encoding)` run on the raw body before parsing; throw to reject |
 
 ---
 

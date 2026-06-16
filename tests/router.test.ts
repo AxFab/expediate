@@ -1849,6 +1849,60 @@ describe('req.text() / req.formData() extension methods (Task #18)', () => {
     assert.ok(Array.isArray(result));
     assert.equal((result as any[])[0].content.toString(), 'cached');
   });
+
+  it('req.json() runs the verify hook with the raw buffer', async () => {
+    const router = createRouter();
+    let seenLen = -1;
+    let parsed: unknown;
+    router.post('/', async (req, res) => {
+      parsed = await req.json({ verify: (_req, _res, buf) => { seenLen = buf.length; } });
+      (res as any).status(200).send('ok');
+    });
+    const body = Buffer.from('{"v":1}');
+    const r = await makeBodyRequest(router, {
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(parsed, { v: 1 });
+    assert.equal(seenLen, body.length);
+  });
+
+  it('req.json() rejects when the verify hook throws (custom status)', async () => {
+    const router = createRouter();
+    let errorStatus = 0;
+    router.post('/', async (req, res) => {
+      try {
+        await req.json({ verify: () => { const e: any = new Error('no'); e.status = 418; throw e; } });
+      } catch (e: any) {
+        errorStatus = e.status ?? 0;
+      }
+      (res as any).status(200).send('caught');
+    });
+    await makeBodyRequest(router, {
+      body:    Buffer.from('{"v":1}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(errorStatus, 418);
+  });
+
+  it('req.text() verify hook defaults to 403 on a status-less throw', async () => {
+    const router = createRouter();
+    let errorStatus = 0;
+    router.post('/', async (req, res) => {
+      try {
+        await req.text({ verify: () => { throw new Error('denied'); } });
+      } catch (e: any) {
+        errorStatus = e.status ?? 0;
+      }
+      (res as any).status(200).send('caught');
+    });
+    await makeBodyRequest(router, {
+      body:    Buffer.from('hello'),
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(errorStatus, 403);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2842,5 +2896,75 @@ describe('res.status() — code validation', () => {
     router.get('/s', (_req, res) => { res.status(200.5).end('ok'); });
     const r = await makeRequest(router, { url: '/s' });
     assert.equal(r.statusCode, 500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — router.route(path) fluent builder
+// ---------------------------------------------------------------------------
+
+describe('router.route(path) — fluent route builder', () => {
+  it('registers multiple HTTP methods against one cached path', async () => {
+    const router = createRouter();
+    router.route('/users')
+      .get((_req, res) => res.status(200).end('get'))
+      .post((_req, res) => res.status(201).end('post'));
+
+    const g = await makeRequest(router, { url: '/users', method: 'GET' });
+    const p = await makeRequest(router, { url: '/users', method: 'POST' });
+    assert.equal(g.statusCode, 200);
+    assert.equal(g.body, 'get');
+    assert.equal(p.statusCode, 201);
+    assert.equal(p.body, 'post');
+  });
+
+  it('returns the same builder from every method to allow chaining', () => {
+    const router = createRouter();
+    const builder = router.route('/x');
+    assert.strictEqual(builder.get((_req, res) => res.end()), builder);
+    assert.strictEqual(builder.put((_req, res) => res.end()), builder);
+  });
+
+  it('forwards the cached path so named parameters still work', async () => {
+    const router = createRouter();
+    router.route('/users/:id')
+      .get((req, res) => res.status(200).end((req as any).params.id));
+
+    const r = await makeRequest(router, { url: '/users/42' });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body, '42');
+  });
+
+  it('supports put, delete, patch, and all', async () => {
+    const router = createRouter();
+    router.route('/r')
+      .put((_req, res) => res.status(200).end('put'))
+      .delete((_req, res) => res.status(200).end('delete'))
+      .patch((_req, res) => res.status(200).end('patch'));
+    router.route('/any').all((_req, res) => res.status(200).end('all'));
+
+    const put    = await makeRequest(router, { url: '/r', method: 'PUT' });
+    const del    = await makeRequest(router, { url: '/r', method: 'DELETE' });
+    const patch  = await makeRequest(router, { url: '/r', method: 'PATCH' });
+    const anyGet = await makeRequest(router, { url: '/any', method: 'GET' });
+    const anyPut = await makeRequest(router, { url: '/any', method: 'PUT' });
+    assert.equal(put.body, 'put');
+    assert.equal(del.body, 'delete');
+    assert.equal(patch.body, 'patch');
+    assert.equal(anyGet.body, 'all');
+    assert.equal(anyPut.body, 'all');
+  });
+
+  it('registers each handler in router.routes() like the direct method calls', () => {
+    const router = createRouter();
+    router.route('/users').get((_req, res) => res.end()).post((_req, res) => res.end());
+    const routes = router.routes();
+    assert.deepEqual(
+      routes.map((r) => ({ method: r.method, path: r.path })),
+      [
+        { method: 'GET',  path: '/users' },
+        { method: 'POST', path: '/users' },
+      ],
+    );
   });
 });

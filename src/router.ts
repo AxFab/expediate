@@ -512,6 +512,35 @@ interface Layer {
 }
 
 /**
+ * Fluent helper returned by {@link Router.route} that registers several
+ * HTTP-method handlers against a single, cached path.
+ *
+ * Each method forwards to the equivalent {@link Router} registration function
+ * with the captured path and returns the same builder, so calls can be chained.
+ *
+ * ```ts
+ * app.route('/users/:id')
+ *   .get(getUser)
+ *   .put(replaceUser)
+ *   .delete(removeUser);
+ * ```
+ */
+interface RouteBuilder {
+  /** Register middleware for all HTTP methods (see {@link Router.all}). */
+  all(...args: MiddlewareArg[]): RouteBuilder;
+  /** Register middleware for `GET` requests. */
+  get(...args: MiddlewareArg[]): RouteBuilder;
+  /** Register middleware for `PUT` requests. */
+  put(...args: MiddlewareArg[]): RouteBuilder;
+  /** Register middleware for `POST` requests. */
+  post(...args: MiddlewareArg[]): RouteBuilder;
+  /** Register middleware for `DELETE` requests. */
+  delete(...args: MiddlewareArg[]): RouteBuilder;
+  /** Register middleware for `PATCH` requests. */
+  patch(...args: MiddlewareArg[]): RouteBuilder;
+}
+
+/**
  * The public interface of the object returned by `createRouter()`.
  *
  * All route-registration methods share the same uniform signature: a mandatory
@@ -568,6 +597,26 @@ interface Router {
   delete(path: string | RegExp, ...args: MiddlewareArg[]): void;
   /** Register middleware for `PATCH` requests. */
   patch(path: string | RegExp, ...args: MiddlewareArg[]): void;
+
+  /**
+   * Return a {@link RouteBuilder} bound to `path` for registering several
+   * HTTP-method handlers without repeating the path.
+   *
+   * The builder simply forwards each call to the matching method-registration
+   * function (`get`, `post`, …) with the cached `path`, so the routing
+   * behaviour is identical to calling those methods directly.
+   *
+   * @param path - Path pattern shared by all handlers registered on the builder.
+   *
+   * @example
+   * ```ts
+   * app.route('/users/:id')
+   *   .get(getUser)
+   *   .put(replaceUser)
+   *   .delete(removeUser);
+   * ```
+   */
+  route(path: string | RegExp): RouteBuilder;
 
   /**
    * Register a global error handler for this router.
@@ -1201,12 +1250,16 @@ function updateHttpObjects(
     inflate: opts?.inflate ?? true,
     reviver: null as null,
     strict:  opts?.strict  ?? false,
+    // readReqBody takes its expected mimetype as an explicit argument, so the
+    // type matcher here is unused; null keeps the object shape-compatible.
+    type:    null,
+    verify:  opts?.verify  ?? null,
   });
 
   rReq.json = (opts?: BodyOptions): Promise<unknown | null> => {
     // If a body-parsing middleware already consumed the stream, return the cached value.
     if ('body' in (rReq as any)) return Promise.resolve((rReq as any).body ?? null);
-    return readReqBody(rReq, resolvedReqOpts(opts), 'application/json')
+    return readReqBody(rReq, resolvedReqOpts(opts), 'application/json', rRes)
       .then(ret => {
         if (ret == null) return null;
         const charset = extractCharset(ret.mimetype);
@@ -1227,7 +1280,7 @@ function updateHttpObjects(
     // If a body-parsing middleware already consumed the stream, return the cached string.
     const cached = (rReq as any).body;
     if (typeof cached === 'string') return Promise.resolve(cached);
-    return readReqBody(rReq, resolvedReqOpts(opts), null)
+    return readReqBody(rReq, resolvedReqOpts(opts), null, rRes)
       .then(ret => {
         if (ret == null) return null;
         const charset = extractCharset(ret.mimetype);
@@ -1239,7 +1292,7 @@ function updateHttpObjects(
     // If a body-parsing middleware already consumed the stream, return the cached parts.
     const cached = (rReq as any).body;
     if (Array.isArray(cached)) return Promise.resolve(cached as FormPart[]);
-    return readReqBody(rReq, resolvedReqOpts(opts), 'multipart/form-data')
+    return readReqBody(rReq, resolvedReqOpts(opts), 'multipart/form-data', rRes)
       .then(ret => {
         if (ret == null) return null;
         try {
@@ -1811,6 +1864,21 @@ function createRouter(
     delete: makeRegister('DELETE', false),
     patch:  makeRegister('PATCH',  false),
 
+    // ── route ────────────────────────────────────────────────────────────────
+    route(path: string | RegExp): RouteBuilder {
+      // Each method forwards to the router's own registration helper with the
+      // cached path and returns the builder so calls can be chained.
+      const builder: RouteBuilder = {
+        all(...args)    { router.all(path, ...args);    return builder; },
+        get(...args)    { router.get(path, ...args);    return builder; },
+        put(...args)    { router.put(path, ...args);    return builder; },
+        post(...args)   { router.post(path, ...args);   return builder; },
+        delete(...args) { router.delete(path, ...args); return builder; },
+        patch(...args)  { router.patch(path, ...args);  return builder; },
+      };
+      return builder;
+    },
+
     // ── onError ─────────────────────────────────────────────────────────────
     onError(handler: ErrorHandler): void {
       errorHandler = handler;
@@ -1906,6 +1974,7 @@ export type {
   ErrorHandler,
   Layer,
   RouteInfo,
+  RouteBuilder,
   CookieOptions,
   TlsOptions,
   StringMap,

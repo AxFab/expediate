@@ -13,7 +13,7 @@ import net    from 'node:net';
 import { describe, it } from 'node:test';
 
 import createRouter from '../src/router.ts';
-import { json, formData, formEncoded, parseBody, logger, streamFormData } from '../src/misc.js';
+import { json, formData, formEncoded, raw, text, parseBody, logger, streamFormData } from '../src/misc.js';
 import type { LoggerOptions } from '../src/misc.ts';
 
 // ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ describe('json() middleware', () => {
       body,
       headers: {
         'content-type':     'application/json',
-        'content-encoding': 'br', // brotli — not in DECOMPRESS_ALGO
+        'content-encoding': 'compress', // not in DECOMPRESS_ALGO (gzip/deflate/br)
       },
     });
     assert.equal(r.statusCode, 415);
@@ -1322,5 +1322,186 @@ describe('streamFormData() (FEAT-11)', () => {
     });
 
     assert.equal(statusCode, 413);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — raw() middleware
+// ---------------------------------------------------------------------------
+
+describe('raw() middleware', () => {
+  it('collects the body into a Buffer on req.body', async () => {
+    let captured: unknown;
+    const router = createRouter();
+    router.use('/', raw() as any);
+    router.post('/', (req: any, res: any) => { captured = req.body; res.end('ok'); });
+
+    const body = Buffer.from([0, 1, 2, 255, 254]);
+    const r = await request(router.listener as any, {
+      body,
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.ok(Buffer.isBuffer(captured), 'req.body must be a Buffer');
+    assert.deepEqual(captured, body);
+  });
+
+  it('passes through a non-matching content type', async () => {
+    let hasBody = true;
+    const router = createRouter();
+    router.use('/', raw() as any); // default application/octet-stream
+    router.post('/', (req: any, res: any) => { hasBody = 'body' in req; res.end('ok'); });
+
+    await request(router.listener as any, {
+      body: Buffer.from('hi'),
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(hasBody, false, 'req.body should not be set for a non-matching type');
+  });
+
+  it('captures any content type with type: "*/*"', async () => {
+    let captured: any;
+    const router = createRouter();
+    router.use('/', raw({ type: '*/*' }) as any);
+    router.post('/', (req: any, res: any) => { captured = req.body; res.end('ok'); });
+
+    await request(router.listener as any, {
+      body: Buffer.from('plain'),
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.ok(Buffer.isBuffer(captured));
+    assert.equal(captured.toString(), 'plain');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — text() middleware
+// ---------------------------------------------------------------------------
+
+describe('text() middleware', () => {
+  it('decodes the body to a string on req.body', async () => {
+    let captured: any;
+    const router = createRouter();
+    router.use('/', text() as any);
+    router.post('/', (req: any, res: any) => { captured = req.body; res.end('ok'); });
+
+    await request(router.listener as any, {
+      body: Buffer.from('hello text'),
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(captured, 'hello text');
+  });
+
+  it('matches any text subtype with type: "text/*"', async () => {
+    let captured: any;
+    const router = createRouter();
+    router.use('/', text({ type: 'text/*' }) as any);
+    router.post('/', (req: any, res: any) => { captured = req.body; res.end('ok'); });
+
+    await request(router.listener as any, {
+      body: Buffer.from('<p>hi</p>'),
+      headers: { 'content-type': 'text/html' },
+    });
+    assert.equal(captured, '<p>hi</p>');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — Brotli request decompression
+// ---------------------------------------------------------------------------
+
+describe('Brotli (br) request decompression', () => {
+  it('json() transparently decompresses a Brotli-encoded body', async () => {
+    let captured: any;
+    const router = createRouter();
+    router.use('/', json() as any);
+    router.post('/', (req: any, res: any) => { captured = req.body; res.end('ok'); });
+
+    const body = zlib.brotliCompressSync(Buffer.from('{"a":1}'));
+    const r = await request(router.listener as any, {
+      body,
+      headers: { 'content-type': 'application/json', 'content-encoding': 'br' },
+    });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(captured, { a: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — parser type option
+// ---------------------------------------------------------------------------
+
+describe('parser type option', () => {
+  it('json({ type: "application/*" }) parses a vendor JSON type', async () => {
+    let captured: any;
+    const router = createRouter();
+    router.use('/', json({ type: 'application/*' }) as any);
+    router.post('/', (req: any, res: any) => { captured = req.body; res.end('ok'); });
+
+    await request(router.listener as any, {
+      body: Buffer.from('{"x":true}'),
+      headers: { 'content-type': 'application/vnd.api+json' },
+    });
+    assert.deepEqual(captured, { x: true });
+  });
+
+  it('json({ type: predicate }) selects requests via a custom function', async () => {
+    let captured: any;
+    const router = createRouter();
+    router.use('/', json({ type: (req) => req.headers['x-json'] === '1' }) as any);
+    router.post('/', (req: any, res: any) => { captured = req.body ?? null; res.end('ok'); });
+
+    await request(router.listener as any, {
+      body: Buffer.from('{"y":2}'),
+      headers: { 'content-type': 'application/octet-stream', 'x-json': '1' },
+    });
+    assert.deepEqual(captured, { y: 2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — verify hook
+// ---------------------------------------------------------------------------
+
+describe('verify hook', () => {
+  it('receives the raw buffer and can reject with a custom status', async () => {
+    const seen: Buffer[] = [];
+    const verify = (_req: any, _res: any, buf: Buffer) => {
+      seen.push(buf);
+      if (buf.includes('bad')) {
+        const e: any = new Error('nope');
+        e.status = 418;
+        throw e;
+      }
+    };
+
+    const router = createRouter();
+    router.use('/', json({ verify }) as any);
+    router.post('/', (req: any, res: any) => res.json(req.body));
+
+    const ok = await request(router.listener as any, {
+      body: Buffer.from('{"a":1}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(ok.statusCode, 200);
+    assert.ok(seen.length >= 1 && Buffer.isBuffer(seen[0]), 'verify should receive a Buffer');
+
+    const bad = await request(router.listener as any, {
+      body: Buffer.from('{"a":"bad"}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(bad.statusCode, 418);
+  });
+
+  it('defaults to 403 when the thrown error has no status', async () => {
+    const router = createRouter();
+    router.use('/', json({ verify: () => { throw new Error('denied'); } }) as any);
+    router.post('/', (req: any, res: any) => res.json(req.body));
+
+    const r = await request(router.listener as any, {
+      body: Buffer.from('{"a":1}'),
+      headers: { 'content-type': 'application/json' },
+    });
+    assert.equal(r.statusCode, 403);
   });
 });

@@ -1,10 +1,12 @@
 # Expediate Roadmap
 
-Date: 2026-06-08
+Date: 2026-06-16
 
 This roadmap is distilled from the full audit in [AUDIT.md](AUDIT.md). Keep
 `AUDIT.md` as the detailed reasoning document and this file as the execution
 checklist.
+
+Legend: `[x]` done · `[~]` partially done (see note) · `[ ]` not started.
 
 ## Milestone 1 - Hardening And Compatibility Baseline
 
@@ -30,7 +32,11 @@ Tasks:
 - [x] Decide body parser content-type policy: Express-style pass-through or
   strict `415`; update tests and docs accordingly.
 - [x] Reset or reject global/sticky user RegExp route patterns.
-- [ ] Add `test:coverage` using Node's native test coverage.
+- [x] Reject control characters (code point < 32, incl. NUL byte) in
+  `serveStatic()` paths with `404` instead of letting `fs.stat()` throw a `500`.
+- [ ] Add `test:coverage` script using Node's native test coverage
+  (`--experimental-test-coverage`). Coverage currently runs only ad hoc; the
+  baseline is ~99% lines / ~92% branches.
 
 ## Milestone 2 - Express Migration Ergonomics
 
@@ -44,17 +50,18 @@ Success criteria:
 
 Tasks:
 
-- [ ] Add `req.query` alias to `req.queries.url`.
-- [ ] Add `req.hostname`, `req.protocol`, `req.secure`, and `req.ips`.
-- [ ] Track `req.baseUrl` through nested routers.
-- [ ] Add `res.append()`, `res.vary()`, `res.location()`, `res.clearCookie()`,
+- [x] Add `req.query` alias to `req.queries.url`.
+- [x] Add `req.hostname`, `req.protocol`, `req.secure`, and `req.ips`.
+- [x] Track `req.baseUrl` through nested routers.
+- [x] Add `res.append()`, `res.vary()`, `res.location()`, `res.clearCookie()`,
   `res.sendStatus()`, `res.attachment()`, and `res.locals`.
-- [ ] Validate `res.status()` codes as integers in the `100..999` range.
+- [x] Validate `res.status()` codes as integers in the `100..999` range.
 
 - [ ] Add `req.get()` / `req.header()`.
 - [ ] Add `res.set()` / `res.header()` and `res.get()`.
-- [ ] Add `router.route(path).get(...).post(...)`.
-- [ ] Decide and document `HEAD`, `OPTIONS`, and automatic `405` behavior.
+- [x] Add `router.route(path).get(...).post(...)`.
+- [ ] Decide and document `HEAD`, `OPTIONS`, and automatic `405` behavior
+  (router currently falls through to `404` on a method mismatch).
 
 ## Milestone 3 - Error And Middleware Model
 
@@ -82,10 +89,10 @@ dependency-light.
 
 Tasks:
 
-- [ ] Add `raw()` middleware.
-- [ ] Add exported `text()` middleware.
-- [ ] Add Brotli request decompression.
-- [ ] Add parser `type` option and optional verify hook.
+- [x] Add `raw()` middleware.
+- [x] Add exported `text()` middleware.
+- [x] Add Brotli request decompression.
+- [x] Add parser `type` option and optional verify hook.
 - [ ] Improve cookie encoding/decoding for semicolons, quotes, spaces, and
   percent-encoded values.
 - [ ] Consider byte-range support for `serveStatic()`, `serveFile()`, and
@@ -98,16 +105,25 @@ Goal: make "lightweight" and "safe" measurable.
 
 Tasks:
 
-- [ ] Add a benchmark harness comparing Expediate, Node `http`, and Express.
-- [ ] Cover scenarios: hello world, JSON, params, middleware chains, body
-  parsing, static files, compression, 404, and 304.
-- [ ] Add stress tests for concurrency, keep-alive, slow uploads, aborted
-  uploads, rate-limit key growth, compression thresholds, and static files.
-- [ ] Add a security request corpus for malformed URLs, traversal, cookies,
-  CORS, CSRF, JWT, multipart, and request-smuggling-adjacent cases.
+- [x] Add a benchmark harness comparing Expediate, Express, and Fastify
+  (`benchmarks/`, with `npm run bench` / `bench:check` and a CI workflow).
+  Note: compares against Fastify rather than raw Node `http` — add a bare
+  `http` baseline server if a true framework floor is wanted.
+- [~] Cover benchmark scenarios. Done: hello world, route params, JSON echo,
+  middleware chain. Still missing: body parsing variants, static files,
+  compression, `404`, and `304`.
+- [x] Add stress tests for concurrency, keep-alive, and load shapes
+  (`loadtest/` — smoke, ramp, spike, soak scenarios + CI workflow). Revisit
+  whether slow/aborted uploads, rate-limit key growth, and compression
+  thresholds are explicitly exercised.
+- [~] Add a security request corpus. Done as fuzz suites: traversal
+  (`static-traversal.fuzz`), multipart (`multipart.fuzz`), JWT (`jwt.fuzz`),
+  ReDoS (`router-redos.fuzz`). Still missing: cookies, CORS, CSRF, and
+  request-smuggling-adjacent cases.
 - [ ] Add package smoke tests for ESM import, CJS require, declarations, and
   `npm pack --dry-run`.
-- [ ] Add CI matrix across supported Node versions.
+- [ ] Add CI matrix across supported Node versions (workflows currently pin a
+  single version, Node 22).
 
 ## Later Product Ideas
 

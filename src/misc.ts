@@ -36,8 +36,46 @@ import type { RouterRequest, RouterResponse, Middleware } from './router.js';
 type Reviver = (key: string, value: unknown) => unknown;
 
 /**
+ * Selects which requests a body parser handles, based on `Content-Type`.
+ *
+ * - **string** — a MIME type, matched against the request's media type.
+ *   Wildcards are supported: `'*\/*'` matches anything and `'application/*'`
+ *   matches any `application/…` subtype.
+ * - **string[]** — matches when any entry matches.
+ * - **function** — a predicate receiving the request; return `true` to handle it.
+ *
+ * Matching is case-insensitive. Requests that do not match are passed through
+ * to the next middleware untouched.
+ */
+export type BodyTypeMatcher =
+  | string
+  | string[]
+  | ((req: RouterRequest) => boolean);
+
+/**
+ * Hook invoked with the raw (already decompressed) body buffer **before** it is
+ * parsed.  Mirrors Express's `verify` option and is typically used to capture
+ * the raw bytes (e.g. for webhook signature verification).
+ *
+ * Throw to reject the request: the thrown value's `status`/`statusCode` is used
+ * as the HTTP status (defaulting to `403`), and its `message` as the body.
+ *
+ * @param req      - The incoming request.
+ * @param res      - The outgoing response.
+ * @param buf      - The raw, decompressed body buffer.
+ * @param encoding - The charset parsed from the `Content-Type` header.
+ */
+export type VerifyFn = (
+  req: RouterRequest,
+  res: RouterResponse,
+  buf: Buffer,
+  encoding: string,
+) => void;
+
+/**
  * Options shared by all body-parsing middleware factories
- * ({@link json}, {@link formData}, {@link parseBody}).
+ * ({@link json}, {@link formData}, {@link formEncoded}, {@link raw},
+ * {@link text}, {@link parseBody}).
  */
 export interface BodyOptions {
   /**
@@ -66,10 +104,74 @@ export interface BodyOptions {
    * @remarks Currently reserved for future enforcement; not yet applied.
    */
   strict?: boolean;
+  /**
+   * Override which requests this parser handles, based on `Content-Type`.
+   * When omitted, each factory uses its natural default (e.g. {@link json}
+   * defaults to `'application/json'`).  See {@link BodyTypeMatcher}.
+   */
+  type?: BodyTypeMatcher;
+  /**
+   * Optional hook called with the raw body buffer before parsing.
+   * Throw to reject the request.  See {@link VerifyFn}.
+   */
+  verify?: VerifyFn | null;
 }
 
-/** Resolved body options with all fields guaranteed to be present. */
-type ResolvedBodyOptions = Required<BodyOptions>;
+/**
+ * Resolved body options with all fields guaranteed to be present.
+ * `type` may be `null` (match any content type, used by {@link parseBody}).
+ */
+type ResolvedBodyOptions = Required<Omit<BodyOptions, 'type' | 'verify'>> & {
+  type:   BodyTypeMatcher | null;
+  verify: VerifyFn | null;
+};
+
+/**
+ * Build a fully-resolved {@link BodyOptions} object, applying defaults for any
+ * unspecified field.  `defaultType` is the parser's natural content type, used
+ * when the caller does not supply `opts.type`.
+ */
+function resolveBodyOptions(
+  opts: BodyOptions | undefined,
+  defaultType: BodyTypeMatcher | null,
+): ResolvedBodyOptions {
+  return {
+    inflate: opts?.inflate ?? true,
+    limit:   opts?.limit   ?? '100kb',
+    reviver: opts?.reviver ?? null,
+    strict:  opts?.strict  ?? true,
+    type:    opts?.type    ?? defaultType,
+    verify:  opts?.verify  ?? null,
+  };
+}
+
+/**
+ * Test whether a request's `Content-Type` matches a {@link BodyTypeMatcher}.
+ * Returns `true` for any request when `matcher` is `null`.
+ */
+function matchesBodyType(req: RouterRequest, matcher: BodyTypeMatcher | null): boolean {
+  if (matcher === null) return true;
+  if (typeof matcher === 'function') return matcher(req);
+
+  const actual = ((req.headers['content-type'] as string) ?? '')
+    .split(';')[0].trim().toLowerCase();
+  if (!actual) return false;
+
+  const patterns = Array.isArray(matcher) ? matcher : [matcher];
+  return patterns.some((pattern) => matchMimePattern(actual, pattern.toLowerCase()));
+}
+
+/**
+ * Match a concrete media type (e.g. `'application/json'`) against a pattern
+ * that may contain wildcards (`'*\/*'`, `'application/*'`).
+ */
+function matchMimePattern(actual: string, pattern: string): boolean {
+  if (pattern === '*/*' || pattern === '*') return true;
+  if (pattern === actual) return true;
+  const [pType, pSub] = pattern.split('/');
+  const [aType]       = actual.split('/');
+  return pSub === '*' && pType === aType;
+}
 
 /**
  * Options for the {@link logger} middleware factory.
@@ -146,11 +248,12 @@ export interface FormPart {
 
 /**
  * Maps a supported `Content-Encoding` value to its corresponding `zlib`
- * decompression function.  Only `gzip` and `deflate` are supported.
+ * decompression function.  `gzip`, `deflate`, and `br` (Brotli) are supported.
  */
 const DECOMPRESS_ALGO: Record<string, (buf: Buffer, cb: zlib.CompressCallback) => void> = {
   gzip:    zlib.gunzip,
   deflate: zlib.inflate,
+  br:      zlib.brotliDecompress,
 };
 
 // ---------------------------------------------------------------------------
@@ -252,8 +355,8 @@ export function extractCharset(contentType: string): string {
  * @param req       - The incoming request.
  * @param res       - The outgoing response.
  * @param opts      - Resolved body-parsing options.
- * @param mimetype  - Expected MIME type (e.g. `'application/json'`), or `null`
- *                    to accept any content type.
+ * @param type      - Content-type matcher (see {@link BodyTypeMatcher}), or
+ *                    `null` to accept any content type.
  * @param next      - The next middleware callback; called when the body is
  *                    empty or absent.
  * @param callback  - Invoked with `(contentType, body)` on success.
@@ -262,7 +365,7 @@ function readBody(
   req:      RouterRequest,
   res:      RouterResponse,
   opts:     ResolvedBodyOptions,
-  mimetype: string | null,
+  type:     BodyTypeMatcher | null,
   next:     () => void,
   callback: (contentType: string, body: Buffer) => void,
 ): void {
@@ -292,11 +395,11 @@ function readBody(
     (encoding ? DECOMPRESS_ALGO[encoding] : undefined) ?? ((d: Buffer, c: zlib.CompressCallback) => c(null, d as any));
 
   // Content-Type validation.
-  // When a specific mimetype is expected and the request carries a different one,
-  // pass through to the next middleware (Express-compatible composable behaviour).
-  // Returning 415 here would break parser stacking: json() + formEncoded() + …
+  // When the request's content type does not match, pass through to the next
+  // middleware (Express-compatible composable behaviour).  Returning 415 here
+  // would break parser stacking: json() + formEncoded() + …
   const contentType = (req.headers['content-type'] as string) ?? '';
-  if (mimetype && contentType.split(';')[0].trim() !== mimetype)
+  if (!matchesBodyType(req, type))
     return next();
 
   // Stream collection.
@@ -321,7 +424,21 @@ function readBody(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     decompress(data as any, (err, decompressed) => {
       if (err) return void res.status(500).send(err.message);
-      callback(contentType, decompressed as Buffer);
+      const body = decompressed as Buffer;
+
+      // Optional verify hook — runs on the raw bytes before parsing. A throw
+      // rejects the request with the error's status (default 403).
+      if (opts.verify) {
+        try {
+          opts.verify(req, res, body, extractCharset(contentType));
+        } catch (e) {
+          const status = (e as { status?: number; statusCode?: number }).status
+            ?? (e as { statusCode?: number }).statusCode ?? 403;
+          return void res.status(status).send((e as Error).message ?? 'Forbidden');
+        }
+      }
+
+      callback(contentType, body);
     });
   });
 }
@@ -331,8 +448,26 @@ export type BodyContent = {
   mimetype : string,
   content: Buffer,
 }
-// TODO
-export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimetype: string | null,):Promise<BodyContent|null> {
+/**
+ * Promise-based body collector used by the `req.json()`, `req.text()`, and
+ * `req.formData()` request helpers.
+ *
+ * @param req      - The incoming request.
+ * @param opts     - Resolved body-parsing options.
+ * @param mimetype - Expected MIME type, or `null` to accept any content type.
+ * @param res      - The outgoing response, required only so an `opts.verify`
+ *                   hook receives the Express-style `(req, res, buf, encoding)`
+ *                   arguments.  When omitted, the verify hook is skipped.
+ * @returns The collected `{ mimetype, content }`, or `null` for an empty body.
+ *          Rejects with `{ status, message }` on size, encoding, type, or
+ *          verify-hook failures.
+ */
+export function readReqBody(
+  req: RouterRequest,
+  opts: ResolvedBodyOptions,
+  mimetype: string | null,
+  res?: RouterResponse,
+): Promise<BodyContent|null> {
 
   return new Promise((resolve, reject) => {
 
@@ -387,7 +522,21 @@ export function readReqBody(req: RouterRequest, opts :ResolvedBodyOptions, mimet
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       decompress(data as any, (err, decompressed) => {
         if (err) return reject({ status: 500, message: err.message });
-        resolve({ mimetype: contentType ?? '', content: decompressed as Buffer });
+        const body = decompressed as Buffer;
+
+        // Optional verify hook — runs on the raw bytes before parsing. A throw
+        // rejects the promise with the error's status (default 403).
+        if (opts.verify && res) {
+          try {
+            opts.verify(req, res, body, extractCharset(contentType));
+          } catch (e) {
+            const status = (e as { status?: number; statusCode?: number }).status
+              ?? (e as { statusCode?: number }).statusCode ?? 403;
+            return reject({ status, message: (e as Error).message ?? 'Forbidden' });
+          }
+        }
+
+        resolve({ mimetype: contentType ?? '', content: body });
       });
     });
 
@@ -661,16 +810,10 @@ const BODY_READERS: Record<
  * @returns An Express-compatible middleware function.
  */
 export function json(opts?: BodyOptions): Middleware {
-  const resolved: ResolvedBodyOptions = {
-    inflate:  true,
-    limit:    '100kb',
-    reviver:  null,
-    strict:   true,
-    ...opts,
-  };
+  const resolved = resolveBodyOptions(opts, 'application/json');
 
   return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-    readBody(req, res, resolved, 'application/json', next, (contentType, body) => {
+    readBody(req, res, resolved, resolved.type, next, (contentType, body) => {
       readBodyAsJson(req, res, next, resolved, contentType, body);
     });
   };
@@ -695,16 +838,10 @@ export function json(opts?: BodyOptions): Middleware {
  * @returns An Express-compatible middleware function.
  */
 export function formData(opts?: BodyOptions): Middleware {
-  const resolved: ResolvedBodyOptions = {
-    inflate:  true,
-    limit:    '100kb',
-    reviver:  null,
-    strict:   true,
-    ...opts,
-  };
+  const resolved = resolveBodyOptions(opts, 'multipart/form-data');
 
   return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-    readBody(req, res, resolved, 'multipart/form-data', next, (contentType, body) => {
+    readBody(req, res, resolved, resolved.type, next, (contentType, body) => {
       readBodyAsFormData(req, res, next, contentType, body);
     });
   };
@@ -736,16 +873,10 @@ export function formData(opts?: BodyOptions): Middleware {
  * ```
  */
 export function formEncoded(opts?: BodyOptions): Middleware {
-  const resolved: ResolvedBodyOptions = {
-    inflate:  true,
-    limit:    '100kb',
-    reviver:  null,
-    strict:   true,
-    ...opts,
-  };
+  const resolved = resolveBodyOptions(opts, 'application/x-www-form-urlencoded');
 
   return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-    readBody(req, res, resolved, 'application/x-www-form-urlencoded', next, (contentType, body) => {
+    readBody(req, res, resolved, resolved.type, next, (contentType, body) => {
       readBodyAsFormEncoded(req, res, next, contentType, body);
     });
   };
@@ -770,20 +901,77 @@ export function formEncoded(opts?: BodyOptions): Middleware {
  * @returns An Express-compatible middleware function.
  */
 export function parseBody(opts?: BodyOptions): Middleware {
-  const resolved: ResolvedBodyOptions = {
-    inflate:  true,
-    limit:    '100kb',
-    reviver:  null,
-    strict:   true,
-    ...opts,
-  };
+  // parseBody matches any content type by default (`null`); callers may still
+  // narrow it via `opts.type`.
+  const resolved = resolveBodyOptions(opts, null);
 
   return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-    readBody(req, res, resolved, null, next, (contentType, body) => {
+    readBody(req, res, resolved, resolved.type, next, (contentType, body) => {
       const mimetype = contentType.split(';')[0].trim();
       if (!BODY_READERS[mimetype])
         return res.status(415).send('Unsupported Media Type');
       BODY_READERS[mimetype](req, res, next, resolved, contentType, body);
+    });
+  };
+}
+
+/**
+ * Middleware factory that collects the request body into a `Buffer` and assigns
+ * it to `req.body` without any parsing.
+ *
+ * Behaviour:
+ * - Defaults to handling `application/octet-stream`; override with `opts.type`
+ *   (e.g. `raw({ type: '*\/*' })` to capture every body).
+ * - Requests without a body are passed through to `next()`.
+ * - Requests whose `Content-Type` does not match are passed through unchanged.
+ * - Bodies larger than `opts.limit` receive **413 Content Too Large**.
+ * - Bodies with an unsupported `Content-Encoding` receive
+ *   **415 Unsupported Media Type**.
+ *
+ * @param opts - Optional configuration (see {@link BodyOptions}).
+ * @returns An Express-compatible middleware function.
+ *
+ * @example
+ * ```ts
+ * app.post('/webhook', raw({ type: 'application/json' }), (req, res) => {
+ *   const raw = req.body as Buffer; // untouched bytes
+ *   res.send('ok');
+ * });
+ * ```
+ */
+export function raw(opts?: BodyOptions): Middleware {
+  const resolved = resolveBodyOptions(opts, 'application/octet-stream');
+
+  return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
+    readBody(req, res, resolved, resolved.type, next, (_contentType, body) => {
+      (req as unknown as { body: Buffer }).body = body;
+      next();
+    });
+  };
+}
+
+/**
+ * Middleware factory that decodes the request body as text (using the charset
+ * from the `Content-Type` header) and assigns the resulting string to
+ * `req.body`.
+ *
+ * Behaviour:
+ * - Defaults to handling `text/plain`; override with `opts.type`
+ *   (e.g. `text({ type: 'text/*' })`).
+ * - Requests without a body are passed through to `next()`.
+ * - Requests whose `Content-Type` does not match are passed through unchanged.
+ * - Bodies larger than `opts.limit` receive **413 Content Too Large**.
+ * - Decoding errors receive **500 Internal Server Error**.
+ *
+ * @param opts - Optional configuration (see {@link BodyOptions}).
+ * @returns An Express-compatible middleware function.
+ */
+export function text(opts?: BodyOptions): Middleware {
+  const resolved = resolveBodyOptions(opts, 'text/plain');
+
+  return (req: RouterRequest, res: RouterResponse, next: () => void): void => {
+    readBody(req, res, resolved, resolved.type, next, (contentType, body) => {
+      readBodyAsPlainText(req, res, next, contentType, body);
     });
   };
 }

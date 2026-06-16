@@ -14,6 +14,8 @@ All notable changes to **expediate** are documented here.
   - **Request validation** — `ServiceDefinition.validate` executes the JSON Schemas declared in `requestBody` metadata (subset validator, `$ref` resolved against the new `ServiceDefinition.schemas`); failures return `400` with `{ message, fieldErrors }`
   - **Context ergonomics** — `ctx.params` (alias of `ctx.query.route`) and `ApiContext<TUser, TState>` generics
   - **OpenAPI security output** — secured operations emit `security: [{ bearerAuth: [] }]`, an `x-required-permissions` vendor extension, and `components.securitySchemes`
+- **Body parsing** — `raw()` (body as `Buffer`) and `text()` (body as `string`) middleware; Brotli (`br`) request decompression alongside gzip/deflate; new `type` option (string / `string[]` / predicate, with `*` wildcards) to control which requests a parser handles, and a `verify(req, res, buf, encoding)` hook run on the raw body before parsing (throw to reject)
+- **Routing** — `router.route(path)` fluent builder for registering several HTTP methods against one path
 - `ErrorHandler` and `RouteInfo` types re-exported from the public API
 - `TokenPayload` and `UserRecord` types re-exported from the public API
 - `CorsOptions` type re-exported from the public API

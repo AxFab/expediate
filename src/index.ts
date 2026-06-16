@@ -37,6 +37,7 @@ export type {
   ErrorHandler,
   Layer,
   RouteInfo,
+  RouteBuilder,
   CookieOptions,
   TlsOptions,
   StringMap,
@@ -52,9 +53,11 @@ export type {
 
 // ── Miscallenous ──────────────────────────────────────────────────────────────
 
-export { json, formData, formEncoded, parseBody, logger, cors, streamFormData, parseMultipartBody } from './misc.js';
+export { json, formData, formEncoded, raw, text, parseBody, logger, cors, streamFormData, parseMultipartBody } from './misc.js';
 export type {
   BodyOptions,
+  BodyTypeMatcher,
+  VerifyFn,
   LoggerOptions,
   FormPart,
   FormPartStream,
