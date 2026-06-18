@@ -1,0 +1,15 @@
+{
+  // Type-aware linting needs a TS program that sees EVERYTHING we lint —
+  // not just the files compiled into dist/. The build tsconfig.json excludes
+  // tests, which is why ESLint's type-checked rules reported "not found by the
+  // project service" for every tests/*.ts file. This config widens the program
+  // to src + tests so typescript-eslint can resolve types there too.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  // `extends` inherits the base tsconfig's exclude ("**/*.test.ts"), which would
+  // drop every test file from the program. Re-declare exclude so tests stay in.
+  "exclude": ["node_modules", "dist"],
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}
