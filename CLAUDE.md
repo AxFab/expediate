@@ -96,7 +96,7 @@ Test files in `tests/` use `tsx` at runtime and are never compiled.
 
 | Source file       | Exports (from `src/index.ts`)                                              |
 |-------------------|----------------------------------------------------------------------------|
-| `router.ts`       | `createRouter`, types: `Router`, `RouterOptions`, `RouterRequest`, `RouterResponse`, `Middleware`, `MiddlewareArg`, `NextFunction`, `ErrorHandler`, `Layer`, `RouteInfo`, `CookieOptions`, `TlsOptions`, `StringMap` |
+| `router.ts`       | `createRouter`, types: `Router`, `RouterOptions`, `RouterRequest`, `RouterResponse`, `Middleware`, `MiddlewareArg`, `NextFunction`, `ErrorHandler`, `ErrorMiddleware`, `Layer`, `RouteInfo`, `CookieOptions`, `TlsOptions`, `StringMap` |
 | `static.ts`       | `serveStatic`, `serveFile`, `sendFile`, `mime`, types: `StaticOptions`, `Mime` |
 | `misc.ts`         | `json`, `formData`, `formEncoded`, `parseBody`, `streamFormData`, `logger`, `cors`, `parseMultipartBody`, types: `BodyOptions`, `LoggerOptions`, `FormPart`, `FormPartStream` |
 | `middleware.ts`   | `compress`, `requestId`, `rateLimit`, `cacheControl`, `csrf`, `securityHeaders`, `conditionalGet`, types: `CompressOptions`, `RequestIdOptions`, `RateLimitOptions`, `CacheControlOptions`, `CsrfOptions`, `SecurityHeadersOptions` |
@@ -213,7 +213,20 @@ const invoke = (mw: Middleware, nextFn: NextFunction): void => {
 };
 ```
 
-A custom error handler registered with `router.onError(handler)` receives the error. Without one, a 500 response is sent. The `next(err)` calling convention skips remaining routes and invokes the error handler directly.
+A caught error (sync throw, async rejection, or `next(err)`) is routed to `invokeErrorHandler`, which resolves it through an ordered cascade (see "Error channel" below). The `next(err)` calling convention skips remaining routes and enters this cascade directly.
+
+### Error channel — `error()` chain, `onError()` fallback, and bubbling
+
+`invokeErrorHandler(e)` runs a per-request `runNext(err)` cascade:
+
+1. **`error()` middleware chain** — handlers registered via `router.error(handler)` (`ErrorMiddleware = (err, req, res, next) => void`, **err first** to distinguish from normal middleware) run in registration order. Each may end the response or call `next` to forward: `next()` re-forwards the same error, `next(newErr)` replaces it. A throw inside an error handler is caught and forwarded to the next one (`runNext(e2)`).
+2. **`onError()` terminal fallback** — if the chain is exhausted without responding, the single `onError(err, req, res)` handler runs (if registered). It is the simple, no-`next` catch-all; preserved for backward compatibility.
+3. **Bubble to parent** — if neither responded and the router was mounted as a sub-router, `done(err)` is called. `done` is the parent listener's `next`, so the error enters the **parent's** error channel. This is how a root-level handler catches failures from deeply nested routers.
+4. **Default 500** — a top-level router (`done === undefined`, e.g. via `http.createServer(router.listener)`) with no handler logs and sends `Error <method> <url>`.
+
+The `stripPath` continuation in the dispatch loop forwards the error: `invoke(layer.middleware, (err?) => { restore req.path/baseUrl; next(err); })`. Without this, a bubbled error would lose its payload (and `req.path`) crossing a `use()` boundary. The continuation does double duty — no-arg call = sub-router fell through (404 delegate), err call = bubbled error.
+
+Async caveat: only the returned promise is tracked. A middleware that calls `next()` then throws later from a detached callback (`setTimeout`, event emitter) is not caught.
 
 ### `router.listen()` signature
 
@@ -517,6 +530,22 @@ interface ApiContext<TUser = unknown, TState = Record<string, unknown>> {
   }
   ```
 
+### `ServiceDefinition.onError` hook
+
+The per-route handler's `.catch` in `buildRoutes` runs an optional
+`service.onError(err, ctx, req)` hook **before** the default `sendError`
+translation:
+
+- returns `undefined` → default `ApiError` → HTTP translation proceeds (log-only).
+- returns an `ApiError` → that value is sent via `sendError` instead.
+- **throws** → `next(err)` is called, escalating to the surrounding app's error
+  channel (`router.error()` / `onError`) instead of answering locally. This is
+  why `buildRoutes` registers handlers with the full `(req, res, next)`
+  signature and threads `next` into the catch.
+
+`ctx` is still in scope in the catch, so the hook gets the full `ApiContext`
+(unlike a router-level `error()` handler, which only sees `(err, req, res)`).
+
 ### Controllers and the merge algorithm (`collectRoutes`)
 
 `ControllerDefinition` = `{ prefix?, tags?, guards?, permission?, GET?, POST?, … }`,
@@ -809,6 +838,7 @@ Open items identified from source comments:
 - ~~Async error catching~~ — The `invoke()` helper wraps every middleware call; `ret instanceof Promise` catches async rejections and routes them to `invokeErrorHandler`.
 - ~~Directory listing sort~~ — `writeIndexOf()` now supports sortable columns via `?C=N;O=D` query params (directories always first).
 - ~~`async setup()` not awaited~~ — `buildModule()` now awaits the `Promise` returned by `setup()` before the module is considered ready.
+- ~~No ordered error middleware / no error bubbling~~ — `router.error()` registers an ordered, escapable error-middleware chain; unhandled errors fall back to `onError()` then **bubble to the parent router** via `done(err)`. `apiBuilder` adds a `ServiceDefinition.onError` hook. The 4-argument arity hack was deliberately rejected (see §14). Async caveat from §3 still applies.
 
 ---
 
@@ -870,6 +900,7 @@ DESCRIBE_META: symbol  // metadata key used to attach OpenAPI annotations
 type Middleware       = (req: RouterRequest, res: RouterResponse, next: NextFunction) => void
 type NextFunction     = (err?: unknown) => void
 type ErrorHandler     = (err: unknown, req: RouterRequest, res: RouterResponse) => void
+type ErrorMiddleware  = (err: unknown, req: RouterRequest, res: RouterResponse, next: NextFunction) => void
 type MiddlewareArg    = Middleware | Router | (Middleware | Router)[]
 
 interface RouterOptions  // secret, timeout, trustProxy
@@ -989,11 +1020,16 @@ used by the build script.
 
 ## 14. Architecture Notes
 
-### No middleware error handling layer
+### Error middleware layer (explicit, not arity-based)
 
-Unlike Express, there is no 4-argument error middleware `(err, req, res, next)`.
-Errors are either caught synchronously by the try/catch in `listener` (→ 500)
-or must be handled within each middleware.
+The framework deliberately avoids Express's 4-argument arity sniffing (fragile
+under minifiers, `...args`, and wrappers). Instead, error middleware is
+registered explicitly via `router.error((err, req, res, next) => …)` — `err`
+first, signalling the error channel. These form an ordered chain that, when
+exhausted, falls back to the single `onError()` handler and then **bubbles to
+the parent router** via `done(err)`. See §3 "Error channel" for the full
+cascade. `apiBuilder` layers on top with a `ServiceDefinition.onError` hook
+(see §7).
 
 ### Response helpers added at augmentation time
 

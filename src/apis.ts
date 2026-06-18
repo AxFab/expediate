@@ -21,7 +21,7 @@
 'use strict';
 
 import createRouter from './router.js';
-import type { RouterRequest, RouterResponse, Router, Middleware } from './router.js';
+import type { RouterRequest, RouterResponse, Router, Middleware, NextFunction } from './router.js';
 import { openApiSpec, serializeSpec, DESCRIBE_META } from './openapi.js';
 import type {
   SpecOptions,
@@ -480,6 +480,29 @@ export interface ServiceDefinition<TInstance extends ServiceInstance = ServiceIn
    * (taking precedence over `SpecOptions.schemas`).
    */
   schemas?: Record<string, JsonSchema>;
+
+  /**
+   * Hook invoked whenever a handler, guard, auth check, or validation step
+   * throws or rejects — before the default {@link ApiError} → HTTP translation.
+   *
+   * Use it to log the failure and/or shape a better response:
+   * - **Return nothing** (`undefined`) → the error is left untouched and the
+   *   built-in translation runs (`{ status, message | data }`, else `500`).
+   *   Ideal for log-only use.
+   * - **Return an {@link ApiError}** → that value is sent instead of the
+   *   original (e.g. to hide internals behind a generic message, or attach a
+   *   correlation id).
+   * - **Throw** → the thrown value is escalated to the surrounding app's error
+   *   channel (`router.error()` / `onError`) instead of being answered here,
+   *   letting a process-wide handler take over.
+   *
+   * @param err - The caught value (thrown or rejected).
+   * @param ctx - The {@link ApiContext} for the failing request.
+   * @param req - The underlying request.
+   * @returns An {@link ApiError} to override the response, or nothing to keep
+   *   the default translation.
+   */
+  onError?(err: unknown, ctx: ApiContext<any>, req: RouterRequest): void | ApiError;
 
   /** Route handlers for `GET` requests. */
   GET?:    RouteMap<TInstance>;
@@ -1131,10 +1154,10 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
    */
   function buildRoutes(
     verbRoutes: CollectedRoute<TInstance>[],
-    register:   (path: string, handler: (req: RouterRequest, res: RouterResponse) => void) => void,
+    register:   (path: string, handler: (req: RouterRequest, res: RouterResponse, next: NextFunction) => void) => void,
   ): void {
     for (const route of verbRoutes) {
-      register(route.path, (req: RouterRequest, res: RouterResponse): void => {
+      register(route.path, (req: RouterRequest, res: RouterResponse, next: NextFunction): void => {
         const routeParams = req.queries?.route ?? {};
         const ctx: ApiContext<any> = {
           query: {
@@ -1176,8 +1199,24 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
               res.status(201).end();
           })
           .catch(err => {
-            // console.error(err)
-            sendError(res, err)
+            // Optional service-level hook: inspect/log and optionally remap the
+            // error before the default ApiError → HTTP translation.
+            if (service.onError) {
+              let override: void | ApiError;
+              try {
+                override = service.onError(err, ctx, req);
+              } catch (hookErr) {
+                // The hook re-threw → escalate to the surrounding app's error
+                // channel (router.error() / onError) instead of answering here.
+                next(hookErr);
+                return;
+              }
+              if (override !== undefined) {
+                sendError(res, override);
+                return;
+              }
+            }
+            sendError(res, err);
           });
       });
     }

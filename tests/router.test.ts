@@ -42,7 +42,15 @@ function makeRequest(
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       try {
-        (router.listener as any)(req, res, () => {
+        // The third argument models a top-level boundary: it receives an error
+        // when one bubbles out of the router's error channel (→ 500), and no
+        // argument when the router simply finds no matching route (→ 404).
+        (router.listener as any)(req, res, (err?: unknown) => {
+          if (err != null) {
+            // Mirror the router's own default 500 message format.
+            if (!res.writableEnded) { res.statusCode = 500; res.end(`Error ${req.method} ${req.url}`); }
+            return;
+          }
           res.statusCode = 404;
           res.end('not found');
         });
@@ -1803,7 +1811,12 @@ function makeBodyRequest(
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       try {
-        (router.listener as any)(req, res, () => {
+        // See makeRequest: error-aware top-level boundary (500 on bubble, else 404).
+        (router.listener as any)(req, res, (err?: unknown) => {
+          if (err != null) {
+            if (!res.writableEnded) { res.statusCode = 500; res.end(`Error ${req.method} ${req.url}`); }
+            return;
+          }
           res.statusCode = 404;
           res.end('not found');
         });
@@ -2138,6 +2151,154 @@ describe('router.onError()', () => {
     router.get('/boom', () => { throw new Error('raw'); });
     const r = await makeRequest(router, { url: '/boom' });
     assert.equal(r.statusCode, 500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 16b — router.error() ordered chain + bubbling
+// ---------------------------------------------------------------------------
+
+describe('router.error()', () => {
+  it('runs an error() middleware when a handler throws', async () => {
+    const router = createRouter();
+    let seen: unknown;
+    router.error((err, _req, res, _next) => { seen = err; res.status(418).send('handled'); });
+    router.get('/boom', () => { throw new Error('kaboom'); });
+
+    const r = await makeRequest(router, { url: '/boom' });
+    assert.equal(r.statusCode, 418);
+    assert.equal(r.body, 'handled');
+    assert.ok(seen instanceof Error);
+  });
+
+  it('runs error() handlers in registration order, stopping at the one that responds', async () => {
+    const router = createRouter();
+    const order: string[] = [];
+    router.error((_err, _req, _res, next) => { order.push('first'); next(); });
+    router.error((_err, _req, res, _next) => { order.push('second'); res.status(400).send('second'); });
+    router.error((_err, _req, res, _next) => { order.push('third'); res.status(500).send('third'); });
+    router.get('/x', () => { throw new Error('e'); });
+
+    const r = await makeRequest(router, { url: '/x' });
+    assert.deepEqual(order, ['first', 'second']);
+    assert.equal(r.body, 'second');
+  });
+
+  it('next(newErr) forwards a replacement error to the next handler', async () => {
+    const router = createRouter();
+    let received: unknown;
+    router.error((_err, _req, _res, next) => next(new Error('replaced')));
+    router.error((err, _req, res, _next) => { received = err; res.status(500).send('done'); });
+    router.get('/x', () => { throw new Error('original'); });
+
+    await makeRequest(router, { url: '/x' });
+    assert.ok(received instanceof Error && received.message === 'replaced');
+  });
+
+  it('falls back to onError() when the error() chain forwards without responding', async () => {
+    const router = createRouter();
+    router.error((_err, _req, _res, next) => next());
+    router.onError((_err, _req, res) => res.status(503).send('fallback'));
+    router.get('/x', () => { throw new Error('e'); });
+
+    const r = await makeRequest(router, { url: '/x' });
+    assert.equal(r.statusCode, 503);
+    assert.equal(r.body, 'fallback');
+  });
+
+  it('a throwing error() handler is itself caught and passed to the next one', async () => {
+    const router = createRouter();
+    let received: unknown;
+    router.error((_err, _req, _res, _next) => { throw new Error('handler exploded'); });
+    router.error((err, _req, res, _next) => { received = err; res.status(500).send('recovered'); });
+    router.get('/x', () => { throw new Error('orig'); });
+
+    const r = await makeRequest(router, { url: '/x' });
+    assert.equal(r.body, 'recovered');
+    assert.ok(received instanceof Error && received.message === 'handler exploded');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 16c — error bubbling across use() boundaries
+// ---------------------------------------------------------------------------
+
+describe('error bubbling to parent router', () => {
+  it("an uncaught error in a sub-router reaches the parent's error() handler", async () => {
+    const child = createRouter();
+    child.get('/explode', () => { throw new Error('deep failure'); });
+
+    const parent = createRouter();
+    let caught: unknown;
+    parent.error((err, _req, res, _next) => { caught = err; res.status(500).send('parent caught'); });
+    parent.use('/child', child);
+
+    const r = await makeRequest(parent, { url: '/child/explode' });
+    assert.equal(r.statusCode, 500);
+    assert.equal(r.body, 'parent caught');
+    assert.ok(caught instanceof Error && caught.message === 'deep failure');
+  });
+
+  it("the child's own error() handler wins over the parent (no bubble when handled)", async () => {
+    const child = createRouter();
+    child.error((_err, _req, res, _next) => res.status(400).send('child handled'));
+    child.get('/explode', () => { throw new Error('x'); });
+
+    const parent = createRouter();
+    let parentCalled = false;
+    parent.error((_err, _req, res, _next) => { parentCalled = true; res.status(500).send('parent'); });
+    parent.use('/child', child);
+
+    const r = await makeRequest(parent, { url: '/child/explode' });
+    assert.equal(r.body, 'child handled');
+    assert.ok(!parentCalled, 'parent error handler must not run when the child handled it');
+  });
+
+  it('a child error() that forwards via next(err) bubbles to the parent', async () => {
+    const child = createRouter();
+    child.error((err, _req, _res, next) => next(err)); // explicitly decline
+    child.get('/explode', () => { throw new Error('not mine') });
+
+    const parent = createRouter();
+    let caught: unknown;
+    parent.error((err, _req, res, _next) => { caught = err; res.status(502).send('parent'); });
+    parent.use('/child', child);
+
+    const r = await makeRequest(parent, { url: '/child/explode' });
+    assert.equal(r.statusCode, 502);
+    assert.ok(caught instanceof Error && caught.message === 'not mine');
+  });
+
+  it('errors bubble through two levels of nesting up to the root', async () => {
+    const grandchild = createRouter();
+    grandchild.get('/fail', () => { throw new Error('3 levels down'); });
+
+    const child = createRouter();
+    child.use('/gc', grandchild);
+
+    const root = createRouter();
+    let caught: unknown;
+    root.error((err, _req, res, _next) => { caught = err; res.status(500).send('root'); });
+    root.use('/c', child);
+
+    const r = await makeRequest(root, { url: '/c/gc/fail' });
+    assert.equal(r.body, 'root');
+    assert.ok(caught instanceof Error && caught.message === '3 levels down');
+  });
+
+  it('path is restored when an error bubbles through a use() boundary', async () => {
+    // Regression: the stripPath continuation must forward the error AND restore
+    // req.path so the parent error handler sees the original path.
+    const child = createRouter();
+    child.get('/explode', () => { throw new Error('boom'); });
+
+    const parent = createRouter();
+    let pathAtError = '';
+    parent.error((_err, req, res, _next) => { pathAtError = req.path; res.status(500).send('ok'); });
+    parent.use('/child', child);
+
+    await makeRequest(parent, { url: '/child/explode' });
+    assert.equal(pathAtError, '/child/explode');
   });
 });
 

@@ -174,12 +174,40 @@ res.locals['user'] = currentUser;    // request-scoped storage
 
 ### Error handling
 
+→ Full reference: [docs/errors.md](docs/errors.md)
+
+Any error thrown by a middleware — synchronous throw, rejected `async` middleware, or an explicit `next(err)` — enters the router's **error channel**.
+
+Register ordered error middleware with `app.error()`. The error value is the **first** argument (to distinguish it from a normal middleware). Each handler either ends the response or calls `next` to pass control along — `next()` forwards the same error, `next(err)` replaces it:
+
 ```ts
-app.onError((err, _req, res) => {
-  const status = (err as any)?.status ?? 500;
-  res.status(status).json({ error: String(err) });
+app.error((err, _req, res, next) => {
+  if ((err as any)?.status === 404) return res.status(404).json({ error: 'Not Found' });
+  next(err); // not ours — let the next handler (or the parent router) deal with it
 });
 
+app.error((err, _req, res, _next) => {
+  res.status((err as any)?.status ?? 500).json({ error: String(err) });
+});
+```
+
+**Bubbling.** When a router's `error()` chain is exhausted without ending the response, the error falls back to that router's `onError()` handler (if any), and otherwise **bubbles up to the parent router** that mounted it via `use()`. This means a single handler on the root router can catch failures raised deep inside nested sub-routers. A top-level router with no handler sends a plain `500`.
+
+```ts
+const api = createRouter();
+api.get('/items/:id', () => { throw new Error('boom'); });
+
+const app = createRouter();
+app.use('/api', api);                       // api has no error handler…
+app.error((err, _req, res) =>               // …so the failure bubbles up to here
+  res.status(500).json({ error: String(err) }));
+```
+
+`onError()` remains available as a simple, single terminal fallback `(err, req, res)` with no `next` — handy when you only want one catch-all and no bubbling.
+
+> Caveat: only the returned promise is tracked. A middleware that calls `next()` and *then* throws later from a detached callback (`setTimeout`, an event emitter) is outside the framework's reach.
+
+```ts
 app.setNotFound((_req, res) => res.status(404).json({ error: 'Not Found' }));
 ```
 
@@ -375,6 +403,19 @@ app.listen(3000);
 ```
 
 Three scoping modes: **singleton** (one global instance), **keyed** (one instance per key), **ephemeral** (new instance per request). Routes are automatically sorted by specificity so declaration order does not matter.
+
+Errors thrown by a handler, guard, auth check, or validation are translated to HTTP automatically (`{ status, message | data }`, else `500`). Add a `service.onError` hook to log or reshape them before that translation — return nothing to keep the default, return an `ApiError` to override the response, or throw to escalate the error to the surrounding app's error channel (`app.error()`):
+
+```ts
+const service: ServiceDefinition<State> = {
+  onError(err, ctx, _req) {
+    metrics.increment('api.error', { path: ctx.path });
+    if (err instanceof DbTimeout) return { status: 503, message: 'Try again shortly' };
+    // return nothing → default translation; throw → bubble up to app.error()
+  },
+  // …routes…
+};
+```
 
 Large APIs split into per-domain **controllers** that merge into one router and one OpenAPI document — with **guards**, a declarative **auth binding** bridged to the JWT plugin, and **runtime request validation** from declared JSON Schemas:
 

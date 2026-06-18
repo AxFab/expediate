@@ -37,6 +37,15 @@
       "description": ""
     },
     {
+      "id": "errors.html",
+      "label": "Error handling",
+      "src": "docs/errors.md",
+      "icon": "<path d=\"M2 2h4v4H2V2zm0 8h4v4H2v-4zm8-8h4v4h-4V2zm0 8h4v4h-4v-4z\"/>",
+      "type": "TechArticle",
+      "title": "Error handling — Expediate",
+      "description": ""
+    },
+    {
       "id": "git.html",
       "label": "Git by http",
       "src": "docs/git.md",

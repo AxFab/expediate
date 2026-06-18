@@ -486,6 +486,44 @@ type ErrorHandler = (
 ) => void;
 
 /**
+ * An ordered error-handling middleware, registered with {@link Router.error}.
+ *
+ * Unlike a regular {@link Middleware}, the error value is the **first**
+ * argument — a deliberate signal that this function runs on the error channel,
+ * not the normal request pipeline.
+ *
+ * The handler may either end the response (handling the error) or call `next`
+ * to pass control along the error channel:
+ * - `next()` — forward the **same** error to the next error middleware.
+ * - `next(newErr)` — forward a **replacement** error instead.
+ *
+ * When the error-middleware chain is exhausted without ending the response,
+ * the router falls back to the {@link Router.onError} handler (if any), and
+ * otherwise bubbles the error to the parent router's error channel. A
+ * top-level router with no handler sends a plain **500**.
+ *
+ * @param err  - The thrown value, rejection reason, or `next(err)` argument.
+ * @param req  - The current request.
+ * @param res  - The current response (not yet ended — the handler must end it
+ *   unless it forwards via `next`).
+ * @param next - Forward control along the error channel.
+ *
+ * @example
+ * ```ts
+ * app.error((err, _req, res, next) => {
+ *   if ((err as any)?.status === 404) return res.status(404).end('Not here');
+ *   next(err); // not ours — let the next handler (or the parent) deal with it
+ * });
+ * ```
+ */
+type ErrorMiddleware = (
+  err: unknown,
+  req: RouterRequest,
+  res: RouterResponse,
+  next: NextFunction,
+) => void;
+
+/**
  * A value that can be registered as a route handler: a single `Middleware`
  * function, a `Router` instance (whose `listener` will be used), or an array
  * of either. Arrays may not be nested.
@@ -694,6 +732,39 @@ interface Router {
    * ```
    */
   onError(handler: ErrorHandler): void;
+
+  /**
+   * Register an ordered error-handling middleware for this router.
+   *
+   * Error middlewares run, in registration order, whenever a middleware throws,
+   * an `async` middleware rejects, or `next(err)` is called. Each handler may
+   * end the response or call `next` to forward control along the error channel
+   * (see {@link ErrorMiddleware}).
+   *
+   * Resolution order when an error occurs:
+   * 1. Every `error()` handler in turn, until one ends the response.
+   * 2. If the chain is exhausted, the {@link Router.onError} fallback (if set).
+   * 3. Otherwise the error **bubbles to the parent router** (the one that
+   *    mounted this router via `use()`), entering its error channel.
+   * 4. A top-level router with no handler sends a plain **500**.
+   *
+   * This bubbling is what lets a single error handler on the root router catch
+   * failures raised deep inside nested sub-routers.
+   *
+   * @example
+   * ```ts
+   * // Child: handle only what it owns, let the rest bubble up.
+   * child.error((err, _req, res, next) => {
+   *   if ((err as any)?.code === 'CHILD') return res.status(400).end('bad');
+   *   next(err);
+   * });
+   *
+   * // Root: final safety net for everything that bubbled up.
+   * app.error((err, _req, res) =>
+   *   res.status((err as any)?.status ?? 500).json({ error: String(err) }));
+   * ```
+   */
+  error(handler: ErrorMiddleware): void;
 
   /**
    * Register a custom handler for requests that match no registered route.
@@ -1773,7 +1844,9 @@ function createRouter(
 
   const routes: Layer[] = [];
 
-  /** Currently registered error handler, or `undefined` for the default 500. */
+  /** Ordered error-handling middlewares registered via `router.error()`. */
+  const errorHandlers: ErrorMiddleware[] = [];
+  /** Terminal fallback registered via `router.onError()`, or `undefined`. */
   let errorHandler:    ErrorHandler | undefined;
   /** Currently registered not-found handler, or `undefined` for the default 404. */
   let notFoundHandler: Middleware   | undefined;
@@ -1827,19 +1900,55 @@ function createRouter(
 
     // ── Centralised error dispatch ─────────────────────────────────────────
     // Invoked for sync throws, async rejections, and next(err) calls.
+    //
+    // Resolution order:
+    //   1. Each error() middleware in turn (it may end the response or forward).
+    //   2. The onError() terminal fallback, if registered.
+    //   3. Bubble to the parent router's error channel via done(err).
+    //   4. Top-level router with no handler → default 500.
     const invokeErrorHandler = (e: unknown): void => {
       if (res.writableEnded) return;
-      if (errorHandler) {
-        try {
-          errorHandler(e, req, res);
-        } catch (e2) {
-          // console.error('Root Err', e2)
-          if (!res.writableEnded) res.status(500).end(`Error ${method} ${url}`);
+
+      let i = 0;
+      const runNext = (err: unknown): void => {
+        if (res.writableEnded) return;
+
+        // 1. Ordered error() middleware chain.
+        if (i < errorHandlers.length) {
+          const handler = errorHandlers[i++];
+          try {
+            // `next()` forwards the same error; `next(newErr)` replaces it.
+            handler(err, req, res, (nextErr?: unknown) =>
+              runNext(nextErr == null ? err : nextErr));
+          } catch (e2) {
+            runNext(e2);
+          }
+          return;
         }
-      } else {
-        console.warn(e);
+
+        // 2. onError() terminal fallback for this router.
+        if (errorHandler) {
+          try {
+            errorHandler(err, req, res);
+          } catch {
+            // console.error('Root Err', e2)
+            if (!res.writableEnded) res.status(500).end(`Error ${method} ${url}`);
+          }
+          return;
+        }
+
+        // 3. Bubble to the parent router's error channel (when mounted via use()).
+        if (done) {
+          done(err);
+          return;
+        }
+
+        // 4. Top-level router with no handler: default 500.
+        console.warn(err);
         res.status(500).end(`Error ${method} ${url}`);
-      }
+      };
+
+      runNext(e);
     };
 
     // ── Safe middleware invocation ─────────────────────────────────────────
@@ -1877,10 +1986,14 @@ function createRouter(
             const baseUrlBefore = req.baseUrl;
             const strippedPrefix = pathBefore.slice(0, pathBefore.length - req.path.length);
             req.baseUrl = baseUrlBefore + strippedPrefix;
-            invoke(layer.middleware, () => {
+            // The continuation doubles as the sub-router's `done`: it runs both
+            // when the sub-router falls through (no error) and when it bubbles an
+            // error up. Forward `err` so a bubbled error reaches this router's
+            // error channel instead of being silently dropped.
+            invoke(layer.middleware, (err?: unknown) => {
               req.path    = pathBefore;
               req.baseUrl = baseUrlBefore;
-              next();
+              next(err);
             });
             return;
           }
@@ -2018,6 +2131,11 @@ function createRouter(
       errorHandler = handler;
     },
 
+    // ── error ────────────────────────────────────────────────────────────────
+    error(handler: ErrorMiddleware): void {
+      errorHandlers.push(handler);
+    },
+
     // ── setNotFound ──────────────────────────────────────────────────────────
     setNotFound(handler: Middleware): void {
       notFoundHandler = handler;
@@ -2106,6 +2224,7 @@ export type {
   MiddlewareArg,
   NextFunction,
   ErrorHandler,
+  ErrorMiddleware,
   Layer,
   RouteInfo,
   RouteBuilder,

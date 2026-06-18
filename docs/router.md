@@ -189,16 +189,34 @@ Setting a cookie with `signed: true` produces an `s:<hmac>.<value>` string. The 
 
 ## Error handling
 
-### Global error handler
+→ Full reference: [errors.md](errors.md)
+
+Synchronous throws, async rejections, and `next(err)` calls all enter the router's **error channel**, which resolves through an ordered `error()` chain, an `onError()` fallback, and finally **bubbles to parent routers** before defaulting to `500`.
+
+### Ordered error handlers (`error()`)
 
 ```ts
-app.onError((err, req, res) => {
+app.error((err, _req, res, next) => {
+  if ((err as any)?.status === 404) return res.status(404).json({ error: 'Not Found' });
+  next(err); // forward to the next handler, or bubble to the parent router
+});
+
+app.error((err, _req, res, _next) =>
+  res.status((err as any)?.status ?? 500).json({ error: String(err) }));
+```
+
+The error value is the **first** argument. `next()` forwards the same error; `next(err)` replaces it. Handlers run in registration order until one ends the response.
+
+### Single terminal fallback (`onError()`)
+
+```ts
+app.onError((err, _req, res) => {
   const status = (err as any)?.status ?? 500;
   res.status(status).json({ error: String(err) });
 });
 ```
 
-Receives all: synchronous throws, async rejections, and `next(err)` calls. Without a registered handler, the default sends `500` and logs to `console.warn`.
+`onError()` is the simple, single catch-all. It runs after the `error()` chain is exhausted and, unlike `error()`, does **not** bubble — it is terminal for its router. Without any handler, the default sends `500` and logs to `console.warn`.
 
 ### Custom 404 handler
 
@@ -215,7 +233,7 @@ app.use('/protected', (req, _res, next) => {
 });
 ```
 
-Calling `next(err)` skips remaining route layers and invokes the error handler directly.
+Calling `next(err)` skips remaining route layers and enters the error channel directly.
 
 ---
 

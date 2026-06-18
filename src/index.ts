@@ -35,6 +35,7 @@ export type {
   MiddlewareArg,
   NextFunction,
   ErrorHandler,
+  ErrorMiddleware,
   Layer,
   RouteInfo,
   RouteBuilder,

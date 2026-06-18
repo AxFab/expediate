@@ -543,6 +543,67 @@ describe('Error handling', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suite 6b — service.onError hook
+// ---------------------------------------------------------------------------
+
+describe('service.onError hook', () => {
+  it('is invoked with the error, ctx, and req when a handler throws', async () => {
+    let seenErr: unknown;
+    let seenPath = '';
+    const service: ServiceDefinition<any> = {
+      onError(err, ctx, _req) { seenErr = err; seenPath = ctx.path; },
+      GET: { '/boom': function () { throw new Error('kaboom'); } },
+    };
+    const r = await request(service, { path: '/boom' });
+    // Returns nothing → default translation still runs (plain Error → 500).
+    assert.equal(r.statusCode, 500);
+    assert.equal(r.body, 'kaboom');
+    assert.ok(seenErr instanceof Error && seenErr.message === 'kaboom');
+    assert.equal(seenPath, '/boom');
+  });
+
+  it('returning an ApiError overrides the response', async () => {
+    const service: ServiceDefinition<any> = {
+      onError(_err, _ctx, _req) {
+        return { status: 502, data: { error: 'masked', ref: 'abc123' } } satisfies ApiError;
+      },
+      GET: { '/boom': function () { throw new Error('internal detail'); } },
+    };
+    const r = await request(service, { path: '/boom' });
+    assert.equal(r.statusCode, 502);
+    assert.deepEqual(r.json(), { error: 'masked', ref: 'abc123' });
+  });
+
+  it('returning nothing leaves the default ApiError translation intact', async () => {
+    const service: ServiceDefinition<any> = {
+      onError() { /* log only */ },
+      GET: { '/boom': function () { throw { status: 404, message: 'Not found' } satisfies ApiError; } },
+    };
+    const r = await request(service, { path: '/boom' });
+    assert.equal(r.statusCode, 404);
+    assert.equal(r.body, 'Not found');
+  });
+
+  it('a hook that throws escalates to the surrounding app error channel', async () => {
+    let appCaught: unknown;
+    const service: ServiceDefinition<any> = {
+      onError(err, _ctx, _req) { throw err; }, // decline → escalate
+      GET: { '/boom': function () { throw new Error('escalated failure'); } },
+    };
+
+    // Mount the api under an app that owns an error() handler.
+    const app = createRouter();
+    app.use('/', json() as any);
+    app.error((err, _req, res, _next) => { appCaught = err; res.status(500).send('app handled'); });
+    app.use('/', apiBuilder(service));
+
+    const r = await requestRouter(app, { path: '/boom' });
+    assert.equal(r.body, 'app handled');
+    assert.ok(appCaught instanceof Error && appCaught.message === 'escalated failure');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Suite 7 — Route parameters and request body
 // ---------------------------------------------------------------------------
 
