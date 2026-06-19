@@ -163,17 +163,13 @@ export type ServiceInstance = Record<string, unknown> & {
  * Methods declared here are copied onto the instance object, bound to `this`,
  * so they can call each other and read/write instance state naturally.
  */
-export type ServiceMethods<TInstance extends ServiceInstance = ServiceInstance> = {
-  [name: string]: (this: TInstance, ...args: unknown[]) => unknown;
-};
+export type ServiceMethods<TInstance extends ServiceInstance = ServiceInstance> = Record<string, (this: TInstance, ...args: unknown[]) => unknown>;
 
 /**
  * A route map: keys are Express-style path patterns, values are handler
  * functions that are invoked with `this` bound to the service instance.
  */
-export type RouteMap<TInstance extends ServiceInstance = ServiceInstance> = {
-  [path: string]: ServiceMethod<TInstance>;
-};
+export type RouteMap<TInstance extends ServiceInstance = ServiceInstance> = Record<string, ServiceMethod<TInstance>>;
 
 /**
  * A pre-handler hook running in the `ctx` world.
@@ -807,7 +803,7 @@ export function validateSchema(
   // ── array keywords ───────────────────────────────────────────────────────
   if (Array.isArray(value) && s.items) {
     value.forEach((item, i) =>
-      validateSchema(item, s.items as JsonSchema, components, childPath(path, i), errors));
+      validateSchema(item, s.items!, components, childPath(path, i), errors));
   }
 
   // ── object keywords ──────────────────────────────────────────────────────
@@ -835,7 +831,7 @@ export function validateSchema(
         if (s.additionalProperties === false)
           addError(errors, childPath(path, prop), 'unknown property');
         else
-          validateSchema(obj[prop], s.additionalProperties as JsonSchema,
+          validateSchema(obj[prop], s.additionalProperties,
             components, childPath(path, prop), errors);
       }
     }
@@ -973,7 +969,7 @@ async function resolveInstance<TInstance extends ServiceInstance>(
 ): Promise<TInstance> {
   if (typeof service.scope !== 'function') {
     // Singleton — routes only run after setup is complete, so this is safe.
-    return modules['singleton'];
+    return modules.singleton;
   }
 
   const key = service.scope(req);
@@ -986,13 +982,11 @@ async function resolveInstance<TInstance extends ServiceInstance>(
   // Keyed — retrieve from resolved cache or initiate (and deduplicate) a build.
   if (modules[key]) return modules[key];
 
-  if (!building[key]) {
-    building[key] = buildModule(service, key).then(instance => {
-      modules[key] = instance;
-      delete building[key];
-      return instance;
-    });
-  }
+  building[key] ??= buildModule(service, key).then(instance => {
+    modules[key] = instance;
+    delete building[key];
+    return instance;
+  });
 
   return building[key];
 }
@@ -1224,11 +1218,11 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
 
   /** Convenience wrapper to register routes for all five HTTP verbs. */
   function registerAllRoutes(): void {
-    buildRoutes(routes.filter(r => r.verb === 'GET'),    (path, h) => api.get(path,    h as any));
-    buildRoutes(routes.filter(r => r.verb === 'POST'),   (path, h) => api.post(path,   h as any));
-    buildRoutes(routes.filter(r => r.verb === 'PUT'),    (path, h) => api.put(path,    h as any));
-    buildRoutes(routes.filter(r => r.verb === 'DELETE'), (path, h) => api.delete(path, h as any));
-    buildRoutes(routes.filter(r => r.verb === 'PATCH'),  (path, h) => api.patch(path,  h as any));
+    buildRoutes(routes.filter(r => r.verb === 'GET'),    (path, h) => api.get(path,    h));
+    buildRoutes(routes.filter(r => r.verb === 'POST'),   (path, h) => api.post(path,   h));
+    buildRoutes(routes.filter(r => r.verb === 'PUT'),    (path, h) => api.put(path,    h));
+    buildRoutes(routes.filter(r => r.verb === 'DELETE'), (path, h) => api.delete(path, h));
+    buildRoutes(routes.filter(r => r.verb === 'PATCH'),  (path, h) => api.patch(path,  h));
   }
 
   if (typeof service.scope !== 'function') {
@@ -1252,7 +1246,7 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
     // time the first HTTP request can be processed.
     buildModule(service, 'singleton')
       .then(instance => {
-        modules['singleton'] = instance;
+        modules.singleton = instance;
         ready = true;
         registerAllRoutes();
       })
@@ -1287,7 +1281,7 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
       ? 'application/yaml; charset=utf-8'
       : 'application/json; charset=utf-8';
     return function (_req: RouterRequest, res: RouterResponse): void {
-      if (!cached) cached = serializeSpec(openApiSpec(service, opts), format);
+      cached ??= serializeSpec(openApiSpec(service, opts), format);
       res.setHeader('Content-Type', contentType);
       res.end(cached);
     };

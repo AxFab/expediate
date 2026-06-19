@@ -22,7 +22,7 @@ import { describe, it } from 'node:test';
 import createRouter         from '../src/router.ts';
 import { json }             from '../src/misc.ts';
 import apiBuilder, { defineController } from '../src/apis.ts';
-import type { ServiceDefinition, ApiError, ServiceInstance, ApiContext } from '../src/apis.ts';
+import type { ServiceDefinition, ApiError, ApiContext } from '../src/apis.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP test helper

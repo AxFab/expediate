@@ -165,7 +165,7 @@ export function compress(opts?: CompressOptions): Middleware {
     // User-supplied filter.
     if (opts?.filter && !opts.filter(req, res)) return next();
 
-    const ae = (req.headers['accept-encoding'] as string) ?? '';
+    const ae = (req.headers['accept-encoding']!) ?? '';
 
     // Negotiate encoding: Brotli > gzip > deflate.
     let compressor: zlib.BrotliCompress | zlib.Gzip | zlib.Deflate | null = null;
@@ -190,8 +190,8 @@ export function compress(opts?: CompressOptions): Middleware {
     const rawRes = res as unknown as http.ServerResponse;
 
     // Capture original write / end before we override them.
-    const origWrite = rawRes.write.bind(rawRes) as typeof rawRes.write;
-    const origEnd   = rawRes.end.bind(rawRes)   as typeof rawRes.end;
+    const origWrite = rawRes.write.bind(rawRes);
+    const origEnd   = rawRes.end.bind(rawRes);
 
     // Route compressor output back to the raw socket.
     comp.on('data',  (chunk: Buffer) => { origWrite(chunk); });
@@ -243,7 +243,7 @@ export function compress(opts?: CompressOptions): Middleware {
       _cb?: (err?: Error | null) => void,
     ): boolean => {
       const enc = typeof encOrCb === 'string' ? encOrCb : 'utf8';
-      const buf = toBuffer(chunk as string | Buffer, enc);
+      const buf = toBuffer(chunk, enc);
 
       if (decided) {
         // Already committed — write directly to the right destination.
@@ -270,7 +270,7 @@ export function compress(opts?: CompressOptions): Middleware {
 
       if (chunk != null) {
         const enc = typeof encOrCb === 'string' ? encOrCb : 'utf8';
-        const buf = toBuffer(chunk as string | Buffer, enc);
+        const buf = toBuffer(chunk, enc);
 
         if (decided) {
           if (doCompress) comp.write(buf);
@@ -954,8 +954,8 @@ export function conditionalGet(): Middleware {
     if (method !== 'GET' && method !== 'HEAD') return next();
 
     const rawRes = res as unknown as http.ServerResponse;
-    const origWrite = rawRes.write.bind(rawRes) as typeof rawRes.write;
-    const origEnd   = rawRes.end.bind(rawRes)   as typeof rawRes.end;
+    const origWrite = rawRes.write.bind(rawRes);
+    const origEnd   = rawRes.end.bind(rawRes);
 
     // Buffer all outgoing body data until we can check freshness at end().
     const pending: Buffer[] = [];
@@ -966,7 +966,7 @@ export function conditionalGet(): Middleware {
       _cb?: (err?: Error | null) => void,
     ): boolean => {
       const enc = typeof encOrCb === 'string' ? encOrCb : 'utf8';
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string, enc);
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, enc);
       pending.push(buf);
       return true;
     };
@@ -982,7 +982,7 @@ export function conditionalGet(): Middleware {
       // Buffer any final chunk passed directly to end().
       if (chunk != null) {
         const enc = typeof encOrCb === 'string' ? encOrCb : 'utf8';
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string, enc);
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, enc);
         pending.push(buf);
       }
 

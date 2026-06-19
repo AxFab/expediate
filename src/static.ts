@@ -29,29 +29,29 @@ import mimetypesJson from './mimetypes.json' with { type: 'json' };
 // ---------------------------------------------------------------------------
 // Mimetypes
 // ---------------------------------------------------------------------------
-export type Mime = {
+export interface Mime {
   lookup: (path: string, fallback: string | null) => string,
   charsets: (mimeType: string) => string | null,
 }
 
 const mime_types = new Map<string, string>();
 const mime_extensions = new Map<string, string>();
-function mime_define(map:string[][]): void {
-  for (var type in map) {
-    var exts = map[type]!;
-    for (var i = 0; i < exts.length; i++)
-      mime_types.set(exts[i], type);
+function mime_define(map: Record<string, string[]>): void {
+  for (const type in map) {
+    const exts = map[type];
+    for (const ext of exts)
+      mime_types.set(ext, type);
     if (!mime_extensions.has(type))
       mime_extensions.set(type, exts[0]);
   }
 };
 
 export const mime: Mime = {
-  lookup: (path: string, fallback: string | null = null): string => mime_types.get(path.replace(/^.*[\.\/\\]/, '').toLowerCase()) ?? fallback ?? 'application/octet-stream',
+  lookup: (path: string, fallback: string | null = null): string => mime_types.get(path.replace(/^.*[./\\]/, '').toLowerCase()) ?? fallback ?? 'application/octet-stream',
   charsets: (mimeType: string): string | null => (/^text\/|^application\/(javascript|json)/).test(mimeType) ? 'UTF-8' : null,
 };
 
-mime_define(mimetypesJson as unknown as string[][]);
+mime_define(mimetypesJson);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,7 +153,7 @@ const UP_PATH_REGEXP = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
  * file name and would make fs.stat() throw, so paths containing them are
  * treated as not found.
  */
-// eslint-disable-next-line no-control-regex
+ 
 const CONTROL_CHAR_REGEXP = /[\x00-\x1f]/;
 
 /** Default security and caching options applied to every response. */
@@ -344,21 +344,6 @@ function encodePath(urlPath: string): string {
   return urlPath.split('/').map(s => encodeURIComponent(s)).join('/');
 }
 
-/**
- * Return `true` when the request carries at least one conditional header
- * (`If-Match`, `If-Unmodified-Since`, `If-None-Match`, or
- * `If-Modified-Since`).
- *
- * @param headers - The incoming request's header map.
- */
-function hasCondition(headers: Record<string, string | string[] | undefined>): boolean {
-  return !!(
-    headers['if-match'] ||
-    headers['if-unmodified-since'] ||
-    headers['if-none-match'] ||
-    headers['if-modified-since']
-  );
-}
 
 /**
  * Evaluate precondition headers (`If-Match` / `If-Unmodified-Since`) against
@@ -386,7 +371,7 @@ function conditionMatch(
   // --- If-Match ---
   const match = reqHeaders['if-match'] as string | undefined;
   if (match) {
-    const etag = resHeaders['etag'] as string | undefined;
+    const etag = resHeaders.etag as string | undefined;
     if (match === '*' || match === etag) return true;
     for (const tag of parseTokenList(match)) {
       if (tag === etag || `W/${tag}` === etag || tag === `W/${etag}`)
@@ -440,7 +425,7 @@ function isCacheFresh(
 
   // --- If-None-Match ---
   if (noneMatch && noneMatch !== '*') {
-    const etag = resHeaders['etag'] as string | undefined;
+    const etag = resHeaders.etag as string | undefined;
     if (!etag) return false;
 
     let etagStale = true;
@@ -725,7 +710,7 @@ function sendIt(
   //    This must be tested BEFORE the precondition headers so that a browser
   //    performing a normal ETag revalidation is not incorrectly rejected.
   if (isCacheFresh(
-    req.headers as Record<string, string | undefined>,
+    req.headers,
     res.getHeaders(),
   )) {
     removeContentHeaders(res);
@@ -738,11 +723,11 @@ function sendIt(
   //    a 412 when conditionMatch returns false (they are cache-validation headers,
   //    not write-precondition headers per RFC 7232).
   const hasPrecondition = !!(
-    (req.headers as Record<string, string | undefined>)['if-match'] ||
+    (req.headers as Record<string, string | undefined>)['if-match'] ??
     (req.headers as Record<string, string | undefined>)['if-unmodified-since']
   );
   if (hasPrecondition && !conditionMatch(
-    req.headers as Record<string, string | undefined>,
+    req.headers,
     res.getHeaders(),
   )) {
     HTTP.PRECONDITION_FAILS(res, opts); return;

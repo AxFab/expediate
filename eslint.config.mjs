@@ -108,6 +108,11 @@ export default tseslint.config(
       '@typescript-eslint/require-await': 'off',
       '@typescript-eslint/dot-notation': 'off',
       '@typescript-eslint/restrict-template-expressions': 'off',
+      // Empty no-op callbacks (e.g. a `next` stub), `||` defaults, and throwaway
+      // reassignments are idiomatic in test scaffolding — not worth flagging.
+      '@typescript-eslint/no-empty-function': 'off',
+      '@typescript-eslint/prefer-nullish-coalescing': 'off',
+      'no-useless-assignment': 'off',
     },
   },
 

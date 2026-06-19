@@ -184,7 +184,7 @@ export interface SpecOptions {
    */
   basePath?:    string;
   /** Server list (defaults to `[{ url: '/' }]` when absent). */
-  servers?:     Array<{ url: string; description?: string }>;
+  servers?:     { url: string; description?: string }[];
   /**
    * Additional schemas merged into `components.schemas` (takes precedence
    * over service-level `openapi.schemas` of the same name).
@@ -205,8 +205,8 @@ export interface OpenApiDocument {
     version:      string;
     description?: string;
   };
-  servers?: Array<{ url: string; description?: string }>;
-  tags?:    Array<{ name: string; description?: string }>;
+  servers?: { url: string; description?: string }[];
+  tags?:    { name: string; description?: string }[];
   paths:    Record<string, Record<string, unknown>>;
   components: {
     schemas:   Record<string, JsonSchema>;
@@ -238,19 +238,9 @@ export type SpecFormat = 'json' | 'yaml';
  * YAML reserved keywords that must be quoted as scalars so that YAML parsers
  * do not interpret them as the corresponding typed values.
  */
-const YAML_KW: Set<string> = new Set([
+const YAML_KW = new Set<string>([
   'true', 'false', 'yes', 'no', 'on', 'off', 'null', '~',
 ]);
-
-/**
- * Pattern for "safe" plain scalars: they can be represented without quoting.
- * A scalar is safe when it:
- * - contains only letters, digits, `_`, `-`, `.` or `/`
- * - starts with a letter, `_`, `/`, or `$`
- * - is not a YAML reserved keyword
- * - does not look like a number
- */
-const SAFE_SCALAR = /^[a-zA-Z$_/][a-zA-Z0-9$_\-./]*$/;
 
 /** Pattern matching integer and floating-point number strings. */
 const LOOKS_LIKE_NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$|^0x[0-9a-fA-F]+$|^0o[0-7]+$/;
@@ -285,7 +275,7 @@ function yamlString(s: string): string {
     s !== s.trim() ||
     // Flow indicator characters anywhere — present in path patterns such as
     // `/items/{id}` and must be quoted to avoid flow-collection ambiguity.
-    /[{}\[\]]/.test(s) ||
+    /[{}[\]]/.test(s) ||
     // Control characters.
     /[\x00-\x1f\x7f]/.test(s);
 
@@ -377,6 +367,10 @@ function toYamlLines(value: unknown): string[] {
     return lines;
   }
 
+  // Defensive fallback: every JSON value type (null, boolean, number, string,
+  // array, object) is handled above, so `value` here is only reachable for
+  // bigint/symbol/function — none of which occur in a JSON-derived spec.
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string
   return [String(value)];
 }
 
@@ -680,7 +674,7 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
   };
 
   // ── Tags ─────────────────────────────────────────────────────────────────────
-  const tags: Array<{ name: string; description?: string }> = [];
+  const tags: { name: string; description?: string }[] = [];
   if (defaultTag) {
     tags.push({ name: defaultTag, description: svcMeta?.tagDescription });
   }
@@ -724,7 +718,7 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
     // Apply route tags (meta-level, else controller-level), then the service
     // default tag when neither is declared.
     const opTags = route.tags ?? (defaultTag ? [defaultTag] : undefined);
-    if (opTags) operation['tags'] = opTags;
+    if (opTags) operation.tags = opTags;
 
     // Carry through any vendor extensions (x-* keys).
     if (meta) {
@@ -739,7 +733,7 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
     // the required permissions.
     if (route.permission) {
       securedRoutes = true;
-      operation['security']            = [{ bearerAuth: [] }];
+      operation.security            = [{ bearerAuth: [] }];
       operation[permissionsExtension]  = route.permission;
     }
 
@@ -777,6 +771,9 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
 // ---------------------------------------------------------------------------
 
 declare module './apis.js' {
+  // The type parameter must match the original declaration's name verbatim for
+  // declaration merging, but isn't referenced in this augmentation's body.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   interface ServiceDefinition<TInstance extends ServiceInstance> {
     /**
      * Service-level OpenAPI metadata.

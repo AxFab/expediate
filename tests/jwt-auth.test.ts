@@ -16,11 +16,9 @@ import createRouter             from '../src/router.ts';
 import { json }                 from '../src/misc.ts';
 import createJwtPlugin, {
   hashPassword,
-  userDatabase,
   signToken,
   verifyToken,
   createMapTokenStore,
-  type JwtConfig,
   type TokenStore,
   type RefreshTokenRecord,
 }                               from '../src/jwt-auth.ts';

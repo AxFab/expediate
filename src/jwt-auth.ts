@@ -384,10 +384,10 @@ const DEFAULT_CONFIG: Omit<JwtConfig, 'refreshTokenStore'> = {
 // ---------------------------------------------------------------------------
 
 /** True for HMAC-based algorithms (HS256 / HS384 / HS512). */
-function isHmac(alg: JwtAlgorithm): boolean { return alg[0] === 'H'; }
+function isHmac(alg: JwtAlgorithm): boolean { return alg.startsWith('H'); }
 
 /** True for ECDSA-based algorithms (ES256 / ES384 / ES512). */
-function isEc(alg: JwtAlgorithm): boolean { return alg[0] === 'E'; }
+function isEc(alg: JwtAlgorithm): boolean { return alg.startsWith('E'); }
 
 /**
  * Return the Node.js crypto hash algorithm string for a JwtAlgorithm.
@@ -710,7 +710,7 @@ function verifyToken(token: string, key: string, alg: JwtAlgorithm): VerifyResul
 function accessSignKey(cfg: JwtConfig): string {
   return isHmac(cfg.alg)
     ? cfg.accessTokenSecret
-    : (cfg.accessTokenPrivateKey as string);
+    : (cfg.accessTokenPrivateKey!);
 }
 
 /**
@@ -721,7 +721,7 @@ function accessSignKey(cfg: JwtConfig): string {
 function accessVerifyKey(cfg: JwtConfig): string {
   return isHmac(cfg.alg)
     ? cfg.accessTokenSecret
-    : (cfg.accessTokenPublicKey as string);
+    : (cfg.accessTokenPublicKey!);
 }
 
 /**
@@ -732,7 +732,7 @@ function accessVerifyKey(cfg: JwtConfig): string {
 function refreshSignKey(cfg: JwtConfig): string {
   return isHmac(cfg.alg)
     ? cfg.refreshTokenSecret
-    : (cfg.refreshTokenPrivateKey ?? cfg.accessTokenPrivateKey as string);
+    : (cfg.refreshTokenPrivateKey ?? cfg.accessTokenPrivateKey!);
 }
 
 /**
@@ -743,7 +743,7 @@ function refreshSignKey(cfg: JwtConfig): string {
 function refreshVerifyKey(cfg: JwtConfig): string {
   return isHmac(cfg.alg)
     ? cfg.refreshTokenSecret
-    : (cfg.refreshTokenPublicKey ?? cfg.accessTokenPublicKey as string);
+    : (cfg.refreshTokenPublicKey ?? cfg.accessTokenPublicKey!);
 }
 
 /**
@@ -779,7 +779,7 @@ async function authenticateUser(username: string, password: string, config: JwtC
  * @returns An {@link AuthResult} with `success: true`.
  */
 async function issueTokenPair(user: UserRecord, config: JwtConfig): Promise<AuthResult> {
-  const claims = config.payload(user);
+  const claims = await config.payload(user);
 
   // Inject standard claims; caller-supplied claims take precedence.
   const fullClaims: Partial<TokenPayload> = {
@@ -797,11 +797,11 @@ async function issueTokenPair(user: UserRecord, config: JwtConfig): Promise<Auth
 
   // Issue a signed JWT refresh token identified by a unique JTI.
   const jti = crypto.randomUUID();
-  const sub  = fullClaims.sub as string;
+  const sub  = fullClaims.sub!;
 
   const refreshClaims: Partial<TokenPayload> = {
     sub, jti, type: 'refresh', iss: config.issuer,
-  } as Partial<TokenPayload>;
+  };
 
   const refreshToken = signToken(refreshClaims, refreshSignKey(config), config.refreshTokenExpiry, config.alg);
 
@@ -1107,7 +1107,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
     // Always clear any previously set user to prevent cross-request contamination.
     delete (req as any).user;
 
-    const authHeader = req.headers['authorization'] as string | undefined;
+    const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) return next();
 
     const token  = authHeader.slice(7);

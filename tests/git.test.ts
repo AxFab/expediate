@@ -14,7 +14,7 @@ import assert       from 'node:assert/strict';
 import http         from 'node:http';
 import net          from 'node:net';
 import path         from 'node:path';
-import { execSync, spawn as spawnChild } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import zlib         from 'node:zlib';
@@ -22,7 +22,6 @@ import { describe, it } from 'node:test';
 
 import createRouter       from '../src/router.ts';
 import { gitHandler, gitCreate } from '../src/git.ts';
-import type { GitHandlerOptions } from '../src/git.ts';
 import type { RouterRequest } from '../src/router.ts';
 
 // ---------------------------------------------------------------------------

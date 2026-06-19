@@ -14,7 +14,6 @@ import { describe, it } from 'node:test';
 
 import createRouter from '../src/router.ts';
 import { json, formData, formEncoded, raw, text, parseBody, logger, streamFormData } from '../src/misc.js';
-import type { LoggerOptions } from '../src/misc.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP test helper
@@ -89,7 +88,7 @@ function request(
 /** Build a multipart/form-data body buffer from an array of parts. */
 function buildMultipart(
   boundary: string,
-  parts: Array<{ headers: Record<string, string>; body: Buffer | string }>,
+  parts: { headers: Record<string, string>; body: Buffer | string }[],
 ): Buffer {
   const chunks: Buffer[] = [];
   for (const part of parts) {
@@ -537,7 +536,7 @@ describe('parseBody() middleware', () => {
 // ---------------------------------------------------------------------------
 
 describe('readSize() — size string parsing (via limit option)', () => {
-  const cases: Array<[string, number, boolean]> = [
+  const cases: [string, number, boolean][] = [
     // [limit, bodySize, shouldBe413]
     ['10b',   9,  false],
     ['10b',   11, true],

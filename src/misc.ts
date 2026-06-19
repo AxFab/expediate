@@ -153,7 +153,7 @@ function matchesBodyType(req: RouterRequest, matcher: BodyTypeMatcher | null): b
   if (matcher === null) return true;
   if (typeof matcher === 'function') return matcher(req);
 
-  const actual = ((req.headers['content-type'] as string) ?? '')
+  const actual = ((req.headers['content-type']!) ?? '')
     .split(';')[0].trim().toLowerCase();
   if (!actual) return false;
 
@@ -283,9 +283,9 @@ function readSize(value: string | number): number {
   if (!fmt) return 0;
   const num = parseFloat(fmt[1] ?? '0');
   const sfx = (fmt[3] ?? 'b').toLowerCase();
-  if (sfx[0] === 'k') return num * 1024;
-  if (sfx[0] === 'm') return num * 1024 * 1024;
-  if (sfx[0] === 'g') return num * 1024 * 1024 * 1024;
+  if (sfx.startsWith('k')) return num * 1024;
+  if (sfx.startsWith('m')) return num * 1024 * 1024;
+  if (sfx.startsWith('g')) return num * 1024 * 1024 * 1024;
   return num;
 }
 
@@ -370,10 +370,10 @@ function readBody(
   callback: (contentType: string, body: Buffer) => void,
 ): void {
 
-  const length = parseInt((req.headers['content-length'] as string) ?? '0', 10);
+  const length = parseInt((req.headers['content-length']!) ?? '0', 10);
 
   // Detect chunked transfer encoding — no Content-Length is present in this case.
-  const isChunked = (req.headers['transfer-encoding'] as string | undefined)
+  const isChunked = (req.headers['transfer-encoding'])
     ?.split(',').map((v) => v.trim()).some((v) => v.toLowerCase() === 'chunked') ?? false;
 
   // No body declared and not chunked — skip to next middleware.
@@ -386,11 +386,10 @@ function readBody(
     return void res.status(413).send('Content Too Large');
 
   // Compression handling.
-  const encoding = req.headers['content-encoding'] as string | undefined;
+  const encoding = req.headers['content-encoding'];
   if (encoding && (opts.inflate === false || !DECOMPRESS_ALGO[encoding]))
     return void res.status(415).send('Unsupported Media Type: Wrong Content-Encoding');
 
-  // eslint-disable-next-line @typescript-eslint/ban-types
   const decompress =
     (encoding ? DECOMPRESS_ALGO[encoding] : undefined) ?? ((d: Buffer, c: zlib.CompressCallback) => c(null, d as any));
 
@@ -398,7 +397,7 @@ function readBody(
   // When the request's content type does not match, pass through to the next
   // middleware (Express-compatible composable behaviour).  Returning 415 here
   // would break parser stacking: json() + formEncoded() + …
-  const contentType = (req.headers['content-type'] as string) ?? '';
+  const contentType = (req.headers['content-type']!) ?? '';
   if (!matchesBodyType(req, type))
     return next();
 
@@ -421,8 +420,8 @@ function readBody(
     if (data === null) return; // aborted during streaming
 
     // zlib types require NonSharedBuffer; Buffer satisfies this at runtime.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    decompress(data as any, (err, decompressed) => {
+     
+    decompress(data, (err, decompressed) => {
       if (err) return void res.status(500).send(err.message);
       const body = decompressed as Buffer;
 
@@ -444,7 +443,7 @@ function readBody(
 }
 
 
-export type BodyContent = {
+export interface BodyContent {
   mimetype : string,
   content: Buffer,
 }
@@ -471,10 +470,10 @@ export function readReqBody(
 
   return new Promise((resolve, reject) => {
 
-    const length = parseInt((req.headers['content-length'] as string) ?? '0', 10);
+    const length = parseInt((req.headers['content-length']!) ?? '0', 10);
 
     // Detect chunked transfer encoding — no Content-Length is present in this case.
-    const isChunked = (req.headers['transfer-encoding'] as string | undefined)
+    const isChunked = (req.headers['transfer-encoding'])
       ?.split(',').map((v) => v.trim()).some((v) => v.toLowerCase() === 'chunked') ?? false;
 
     // No body declared and not chunked — resolve with null.
@@ -487,16 +486,15 @@ export function readReqBody(
       return reject({ status: 413, message: 'Content Too Large' });
 
     // Compression handling.
-    const encoding = req.headers['content-encoding'] as string | undefined;
+    const encoding = req.headers['content-encoding'];
     if (encoding && (opts.inflate === false || !DECOMPRESS_ALGO[encoding]))
       return reject({ status: 415, message: 'Unsupported Media Type: Wrong Content-Encoding' });
 
-    // eslint-disable-next-line @typescript-eslint/ban-types
     const decompress =
       (encoding ? DECOMPRESS_ALGO[encoding] : undefined) ?? ((d: Buffer, c: zlib.CompressCallback) => c(null, d as any));
 
     // Content-Type validation.
-    const contentType = (req.headers['content-type'] as string) ?? '';
+    const contentType = (req.headers['content-type']!) ?? '';
     if (mimetype && contentType.split(';')[0].trim() !== mimetype)
       return reject({ status: 415, message: 'Unsupported Media Type: Wrong Content-Type' });
 
@@ -519,8 +517,8 @@ export function readReqBody(
       if (data === null) return; // aborted during streaming
 
       // zlib types require NonSharedBuffer; Buffer satisfies this at runtime.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      decompress(data as any, (err, decompressed) => {
+       
+      decompress(data, (err, decompressed) => {
         if (err) return reject({ status: 500, message: err.message });
         const body = decompressed as Buffer;
 
@@ -723,8 +721,8 @@ function readBodyAsFormData(
     (req as any).body = parseMultipartBody(contentType, data);
     next();
   } catch (ex: any) {
-    const status = (ex as any).status ?? 500;
-    res.status(status).send((ex as any).message ?? String(ex));
+    const status = (ex).status ?? 500;
+    res.status(status).send((ex).message ?? String(ex));
   }
 }
 
@@ -986,7 +984,7 @@ export function text(opts?: BodyOptions): Middleware {
  *
  * Yielded by {@link streamFormData}.
  */
-export type FormPartStream = {
+export interface FormPartStream {
   /**
    * Raw part headers (e.g. `Content-Disposition`, `Content-Type`).
    * Keys are lowercased; values are trimmed.
@@ -997,7 +995,7 @@ export type FormPartStream = {
    * part content as a single chunk and then ends.
    */
   stream: Readable;
-};
+}
 
 /**
  * Async generator that yields each part of a `multipart/form-data` request
@@ -1046,7 +1044,7 @@ export async function* streamFormData(
   }
 
   const body        = Buffer.concat(chunks);
-  const contentType = (req.headers['content-type'] as string) ?? '';
+  const contentType = (req.headers['content-type']!) ?? '';
   const parts       = parseMultipartBody(contentType, body);
 
   for (const part of parts) {
@@ -1168,7 +1166,7 @@ export function logger(opts?: Partial<LoggerOptions>): Middleware {
           length: contentLen,
         })
       else
-        log(`${timestamp} ${statusStr} ${req.method} ${requestPath} ${ip} <${user}> ${elapsed}ms (${contentLen})`);
+        log(`${timestamp} ${statusStr} ${req.method} ${requestPath} ${ip} <${user}> ${elapsed}ms (${String(contentLen)})`);
     });
 
     next();
@@ -1180,7 +1178,7 @@ export function logger(opts?: Partial<LoggerOptions>): Middleware {
 // Cors middleware
 // ---------------------------------------------------------------------------
 
-export type CorsOptions = {
+export interface CorsOptions {
   origin: string | string[],
   allowHeaders: string | string[],
   allowMethods: string | string[],
@@ -1193,13 +1191,13 @@ export type CorsOptions = {
 
 export function cors(opts?: Partial<CorsOptions>): Middleware {
   const options:CorsOptions = {
-    origin: opts?.origin || '*',
-    allowHeaders: opts?.allowHeaders || 'Accept, Content-Type, Authorization',
-    allowMethods: opts?.allowMethods || 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    origin: opts?.origin ?? '*',
+    allowHeaders: opts?.allowHeaders ?? 'Accept, Content-Type, Authorization',
+    allowMethods: opts?.allowMethods ?? 'GET,HEAD,PUT,PATCH,POST,DELETE',
     allowCredentials: opts?.allowCredentials,
     maxAge: opts?.maxAge,
     vary: opts?.vary,
-    optionsStatus: opts?.optionsStatus || 204,
+    optionsStatus: opts?.optionsStatus ?? 204,
     preflight: opts?.preflight,
   };
 

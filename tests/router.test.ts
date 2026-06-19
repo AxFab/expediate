@@ -167,8 +167,8 @@ describe('compilePlainPath', () => {
   it('use() strips the matched prefix so child routers see only the suffix', async () => {
     // use() has stripPath:true — child sees req.path without the /users/:id prefix.
     const child = createRouter();
-    let childPath = '';
-    child.get('/profile', (req, res) => { childPath = req.path; res.end('ok'); });
+    let _childPath = '';
+    child.get('/profile', (req, res) => { _childPath = req.path; res.end('ok'); });
 
     const parent = createRouter();
     parent.use('/users/:id', child);

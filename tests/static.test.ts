@@ -33,7 +33,6 @@ import { describe, it, before } from 'node:test';
 
 import createRouter from '../src/router.ts';
 import { serveStatic, serveFile, sendFile } from '../src/static.ts';
-import type { StaticOptions } from '../src/static.ts';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -732,13 +731,7 @@ describe('serveFile — single fixed file middleware', () => {
 describe('sendFile — utility function', () => {
   it('serves a specific file directly', async () => {
     const target = nodePath.join(PUBLIC, 'hello.txt');
-    const mw = serveStatic(PUBLIC); // use the router to augment req/res
-    // We call sendFile via a custom middleware wrapper
-    const wrapper = (req: any, res: any, next: any) => {
-      (mw as any)(req, res, () => {}); // augment req
-      // Reset — we want to test sendFile directly
-    };
-    // Simpler: test sendFile via a custom route
+    // Test sendFile via a custom route
     const router = createRouter();
     router.get('/direct', (req: any, res: any) => {
       (sendFile as any)(req, res, target, {
@@ -881,7 +874,7 @@ before(() => {
 
   const t0 = new Date('2024-01-01T00:00:00Z'); // stable mtime for all public files
 
-  const publicFiles: Array<[string, string]> = [
+  const publicFiles: [string, string][] = [
     ['.dotfile',           'dot'],
     ['.hidden/secret.txt', 'secret'],
     ['app.js',             'console.log(1)'],

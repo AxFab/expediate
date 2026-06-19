@@ -175,7 +175,7 @@ const PKT_FLUSH = '0000';
  * @returns An Express-compatible middleware function `(req, res) => void`.
  * @throws {TypeError} When `opt.repository` is not a function.
  */
-export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: RouterResponse) => void {
+export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: RouterResponse) => void | Promise<void> {
   if (typeof opt.repository !== 'function')
     throw new TypeError('gitHandler: opt.repository must be a function');
 
@@ -194,14 +194,14 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
     // ── GET /info/refs?service=git-xxxxxx-pack ──────────────────────────
     if (req.method === 'GET' && urlPath === '/info/refs') {
 
-      let args = [];
+      let args: string[];
       const service = req.queries?.url?.service;
       if (service === 'git-upload-pack')
         args = buildArgs(opt, ['--stateless-rpc', '--advertise-refs', gitDirectory]);
       else if (service === 'git-receive-pack')
         args = ['--stateless-rpc', '--advertise-refs', gitDirectory]
       else {
-        res.status(403).send(`Service ${service} is not supported`);
+        res.status(403).send(`Service ${String(service)} is not supported`);
         return
       }
 
@@ -244,7 +244,7 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
 
     // ── POST /git-upload-pack or /git-receive-pack ──────────────────────
     if (req.method === 'POST' && (urlPath === '/git-upload-pack' || urlPath === '/git-receive-pack')) {
-      const contentType = (req.headers['content-type'] as string) || '';
+      const contentType = (req.headers['content-type']!) || '';
       const service = urlPath.substring(1);
 
       if (contentType !== `application/x-${service}-request`) {
@@ -252,7 +252,7 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
         return
       }
 
-      let args = [];
+      let args: string[];
       if (service === 'git-upload-pack')
         args = buildArgs(opt, ['--stateless-rpc', gitDirectory]);
       else if (service === 'git-receive-pack')
@@ -275,7 +275,7 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
       });
 
       // Transparently decompress gzip-encoded request bodies.
-      const encoding = (req.headers['content-encoding'] as string | undefined);
+      const encoding = (req.headers['content-encoding']);
       if (encoding === 'gzip') {
         const gunzip = createGunzip();
         gunzip.on('error', (err) => {

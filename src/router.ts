@@ -187,7 +187,7 @@ interface RouterRequest extends http.IncomingMessage {
    * Returns the parsed value, or `null` when the request has no body.
    * Rejects with `{ status, message }` on parse or transport errors.
    */
-  json(opts?: BodyOptions): Promise<unknown | null>;
+  json(opts?: BodyOptions): Promise<unknown>;
 
   /**
    * The IP address of the remote client.
@@ -1058,6 +1058,7 @@ function compilePlainPath(path: string, exact = false): RegExp {
   } catch (e) {
     throw new SyntaxError(
       `Invalid inline regex constraint in path '${path}': ${(e as Error).message}`,
+      { cause: e },
     );
   }
 }
@@ -1169,7 +1170,7 @@ function matchRouteLayer(
   const m = layer.regex.exec(path);
   if (m === null) return false;
 
-  const captured: StringMap = (m.groups as StringMap | undefined) ?? {};
+  const captured: StringMap = (m.groups) ?? {};
 
   // Only rewrite req.path for prefix-style (use) registrations.
   // Exact-method routes leave req.path intact so chained middlewares
@@ -1421,7 +1422,7 @@ function updateHttpObjects(
   const resolvedReqOpts = (opts?: BodyOptions) => ({
     limit:   opts?.limit   ?? '100kb',
     inflate: opts?.inflate ?? true,
-    reviver: null as null,
+    reviver: null,
     strict:  opts?.strict  ?? false,
     // readReqBody takes its expected mimetype as an explicit argument, so the
     // type matcher here is unused; null keeps the object shape-compatible.
@@ -1429,7 +1430,7 @@ function updateHttpObjects(
     verify:  opts?.verify  ?? null,
   });
 
-  rReq.json = (opts?: BodyOptions): Promise<unknown | null> => {
+  rReq.json = (opts?: BodyOptions): Promise<unknown> => {
     // If a body-parsing middleware already consumed the stream, return the cached value.
     if ('body' in (rReq as any)) return Promise.resolve((rReq as any).body ?? null);
     return readReqBody(rReq, resolvedReqOpts(opts), 'application/json', rRes)
@@ -1742,9 +1743,9 @@ function registerRoute(
     for (const item of arg) registerRoute(routes, method, path, item, stripPath);
   } else if (typeof arg === 'function') {
     routes.push(buildRouteLayer(method, path, arg, stripPath));
-  } else if (arg && typeof (arg as Router).listener === 'function') {
+  } else if (arg && typeof (arg).listener === 'function') {
     // Router instance — unwrap its listener.
-    routes.push(buildRouteLayer(method, path, (arg as Router).listener, stripPath));
+    routes.push(buildRouteLayer(method, path, (arg).listener, stripPath));
   } else {
     throw new TypeError(
       'Unexpected value registered as middleware: expected a Middleware ' +
@@ -1769,7 +1770,7 @@ function registerRoute(
  */
 function extractRouterPrefix(arg: MiddlewareArg): string | undefined {
   if (Array.isArray(arg) || typeof arg === 'function') return undefined;
-  return (arg as Router).prefix;
+  return (arg).prefix;
 }
 
 // ---------------------------------------------------------------------------
@@ -1919,7 +1920,7 @@ function createRouter(
           try {
             // `next()` forwards the same error; `next(newErr)` replaces it.
             handler(err, req, res, (nextErr?: unknown) =>
-              runNext(nextErr == null ? err : nextErr));
+              runNext(nextErr ?? err));
           } catch (e2) {
             runNext(e2);
           }
@@ -2085,8 +2086,8 @@ function createRouter(
     } else {
       // No explicit path: the first argument is itself a middleware / Router.
       // Infer mount path from the Router's prefix, or default to '/'.
-      const inferredPath = extractRouterPrefix(pathOrFirst as MiddlewareArg) ?? '/';
-      registerRoute(routes, null, inferredPath, pathOrFirst as MiddlewareArg, true);
+      const inferredPath = extractRouterPrefix(pathOrFirst) ?? '/';
+      registerRoute(routes, null, inferredPath, pathOrFirst, true);
       for (const arg of args) registerRoute(routes, null, '/', arg, true);
     }
   };
@@ -2186,7 +2187,7 @@ function createRouter(
       const rawListener = listener as unknown as http.RequestListener;
       let server: http.Server | https.Server | http2.Http2SecureServer;
 
-      const tlsOpts = opts as TlsOptions | undefined;
+      const tlsOpts = opts;
 
       if (tlsOpts?.key && tlsOpts?.cert) {
         if (tlsOpts.http2) {
