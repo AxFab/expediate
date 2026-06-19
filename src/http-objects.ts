@@ -23,9 +23,21 @@
 // ---------------------------------------------------------------------------
 // HTTP request/response augmentation
 // ---------------------------------------------------------------------------
-// Extracted from router.ts. Holds `updateHttpObjects()` — which attaches all
-// the Express-compatible req/res helpers — together with the cookie
-// encode/decode/sign/verify helpers it depends on.
+// Holds `updateHttpObjects()` — which prepares each req/res pair for router
+// middleware — together with the cookie encode/decode/sign/verify helpers it
+// depends on.
+//
+// Performance note (the reason this file looks the way it does):
+// the Express-compatible req/res helpers (`send`, `json`, `status`, `cookie`,
+// `download`, `text`, `formData`, …) are defined ONCE on two shared prototype
+// objects, not re-allocated as closures on every request. `updateHttpObjects`
+// only sets the genuinely per-request DATA fields (path, params, cookies, ip…)
+// and then splices the shared prototype into the object's chain via
+// `Object.setPrototypeOf`. The helpers read `this` instead of capturing the
+// `req`/`res`/`secret` in a closure, so nothing per-helper is allocated.
+// The only per-request state the helpers cannot read from `this` directly —
+// the cookie-signing secret — is stashed on the response under a private
+// symbol; `res.download` reaches the request through Node's standard `res.req`.
 
 import * as crypto from 'crypto';
 import * as fs     from 'fs';
@@ -146,29 +158,367 @@ function verifyCookieValue(signed: string, secret: string): string | false {
 }
 
 // ---------------------------------------------------------------------------
+// Per-request state carried on the object (not via closures)
+// ---------------------------------------------------------------------------
+
+/**
+ * Private key under which the cookie-signing secret is stashed on each
+ * response.  The shared prototype's `cookie()` reads it from `this` instead of
+ * closing over a per-request `secret` variable.
+ */
+const kSecret: unique symbol = Symbol('expediate.secret');
+
+/** Response shape once the signing secret has been attached. */
+interface SecretCarrier { [kSecret]?: string | undefined; }
+
+/**
+ * Private key linking a request back to its response.  `req.json()/text()/
+ * formData()` pass it to {@link readReqBody} so the optional `verify` hook is
+ * invoked with `(req, res, buf)` — Node's `IncomingMessage` has no `res`
+ * backlink of its own, so the router threads it on here.
+ */
+const kRes: unique symbol = Symbol('expediate.res');
+
+/** Request shape once the response backlink has been attached. */
+interface ResCarrier { [kRes]?: RouterResponse | undefined; }
+
+/**
+ * Resolve user-supplied {@link BodyOptions} into the concrete option object
+ * expected by {@link readReqBody}.  A free function (no per-request closure):
+ * it depends only on its `opts` argument.
+ */
+function resolveReqOpts(opts?: BodyOptions) {
+  return {
+    limit:   opts?.limit   ?? '100kb',
+    inflate: opts?.inflate ?? true,
+    reviver: null,
+    strict:  opts?.strict  ?? false,
+    // readReqBody takes its expected mimetype as an explicit argument, so the
+    // type matcher here is unused; null keeps the object shape-compatible.
+    type:    null,
+    verify:  opts?.verify  ?? null,
+  };
+}
+
+/** Status-line reason phrases used by `res.sendStatus()` (hoisted, shared). */
+const STATUS_MESSAGES: Record<number, string> = {
+  100: 'Continue', 101: 'Switching Protocols', 102: 'Processing',
+  200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
+  206: 'Partial Content', 207: 'Multi-Status',
+  300: 'Multiple Choices', 301: 'Moved Permanently', 302: 'Found',
+  303: 'See Other', 304: 'Not Modified', 307: 'Temporary Redirect',
+  308: 'Permanent Redirect',
+  400: 'Bad Request', 401: 'Unauthorized', 402: 'Payment Required',
+  403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
+  406: 'Not Acceptable', 408: 'Request Timeout', 409: 'Conflict',
+  410: 'Gone', 411: 'Length Required', 413: 'Payload Too Large',
+  415: 'Unsupported Media Type', 422: 'Unprocessable Entity',
+  429: 'Too Many Requests',
+  500: 'Internal Server Error', 501: 'Not Implemented',
+  502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout',
+};
+
+// ---------------------------------------------------------------------------
+// Shared request helpers (defined once; spliced onto each req via prototype)
+// ---------------------------------------------------------------------------
+
+const requestHelpers = {
+  /** Read and parse the request body as JSON (cached after first read). */
+  json(this: RouterRequest, opts?: BodyOptions): Promise<unknown> {
+    // If a body-parsing middleware already consumed the stream, return the cached value.
+    if ('body' in this) return Promise.resolve((this as { body?: unknown }).body ?? null);
+    return readReqBody(this, resolveReqOpts(opts), 'application/json', (this as RouterRequest & ResCarrier)[kRes])
+      .then(ret => {
+        if (ret == null) return null;
+        const charset = extractCharset(ret.mimetype);
+        try {
+          const parsed: unknown = JSON.parse(
+            ret.content.toString(charset as BufferEncoding),
+            opts?.reviver ?? undefined,
+          );
+          (this as { body?: unknown }).body = parsed;
+          return parsed;
+        } catch (ex) {
+          return Promise.reject({ status: 400, message: 'Bad Request: ' + (ex as Error).message });
+        }
+      });
+  },
+
+  /** Read and decode the request body as plain text (cached after first read). */
+  text(this: RouterRequest, opts?: BodyOptions): Promise<string | null> {
+    const cached = (this as { body?: unknown }).body;
+    if (typeof cached === 'string') return Promise.resolve(cached);
+    return readReqBody(this, resolveReqOpts(opts), null, (this as RouterRequest & ResCarrier)[kRes])
+      .then(ret => {
+        if (ret == null) return null;
+        const charset = extractCharset(ret.mimetype);
+        return ret.content.toString(charset as BufferEncoding);
+      });
+  },
+
+  /** Read and parse the request body as `multipart/form-data` (cached). */
+  formData(this: RouterRequest, opts?: BodyOptions): Promise<FormPart[] | null> {
+    const cached = (this as { body?: unknown }).body;
+    if (Array.isArray(cached)) return Promise.resolve(cached as FormPart[]);
+    return readReqBody(this, resolveReqOpts(opts), 'multipart/form-data', (this as RouterRequest & ResCarrier)[kRes])
+      .then(ret => {
+        if (ret == null) return null;
+        try {
+          const parts = parseMultipartBody(ret.mimetype, ret.content);
+          (this as { body?: unknown }).body = parts;
+          return parts;
+        } catch (ex: any) {
+          return Promise.reject({ status: ex.status ?? 500, message: ex.message ?? String(ex) });
+        }
+      });
+  },
+
+  /** Read a request header by name (case-insensitive; referer/referrer alias). */
+  header(this: RouterRequest, name: string): string | string[] | undefined {
+    const key = name.toLowerCase();
+    // Express treats the two spellings of the referer header as equivalent.
+    if (key === 'referer' || key === 'referrer')
+      return this.headers.referer ?? this.headers.referrer;
+    return this.headers[key];
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Shared response helpers (defined once; spliced onto each res via prototype)
+// ---------------------------------------------------------------------------
+
+const responseHelpers = {
+  send(this: RouterResponse, data?: string): void {
+    if (data) this.write(data);
+    this.end();
+  },
+
+  json(this: RouterResponse, data: unknown): void {
+    this.setHeader('Content-Type', 'application/json');
+    this.write(JSON.stringify(data));
+    this.end();
+  },
+
+  status(this: RouterResponse, code: number, headers?: StringMap): RouterResponse {
+    if (!Number.isInteger(code) || code < 100 || code > 999)
+      throw new RangeError(`Invalid status code: ${code}. Must be an integer between 100 and 999.`);
+    this.statusCode = code;
+    if (headers)
+      for (const [k, v] of Object.entries(headers)) this.setHeader(k, v);
+    return this;
+  },
+
+  redirect(this: RouterResponse, url: string): void {
+    this.setHeader('location', url);
+    this.writeHead(302);
+    this.write(`Found. Redirecting to ${url}`);
+    this.end();
+  },
+
+  cookie(
+    this: RouterResponse,
+    name: string,
+    value: string | object,
+    options?: CookieOptions,
+  ): RouterResponse {
+    const opts: CookieOptions = options ?? {};
+
+    // Serialise: objects get the j: prefix so the reader can JSON-decode them.
+    let val =
+      typeof value === 'object' ? 'j:' + JSON.stringify(value) : String(value);
+
+    if (opts.signed) {
+      const secret = (this as RouterResponse & SecretCarrier)[kSecret];
+      if (!secret)
+        throw new Error(
+          'Signed cookies require a secret — pass { secret } to createRouter()',
+        );
+      val = signCookieValue(val, secret);
+    }
+
+    // Percent-encode the final value (after any j:/s: wrapping) so special
+    // characters are transmitted safely; decodeCookieValue() reverses it.
+    let txt = `${name}=${encodeCookieValue(val)}`;
+
+    if (opts.maxAge != null) {
+      const maxAgeMs  = opts.maxAge;
+      const maxAgeSec = Math.floor(maxAgeMs / 1000);
+      // Only derive Expires from maxAge when maxAge > 0; a zero maxAge is used
+      // for clearing cookies and the caller may have already set opts.expires
+      // to the epoch — do not overwrite it.
+      if (maxAgeMs > 0) opts.expires = new Date(Date.now() + maxAgeMs);
+      txt += `; Max-Age=${maxAgeSec}`;
+    }
+
+    if (opts.expires)  txt += `; Expires=${opts.expires.toUTCString()}`;
+    txt += `; Path=${opts.path ?? '/'}`;
+    if (opts.httpOnly) txt += '; HttpOnly';
+    if (opts.secure)   txt += '; Secure';
+    if (opts.sameSite) txt += `; SameSite=${opts.sameSite}`;
+
+    // Append rather than overwrite so multiple cookies can be set on the same
+    // response.  res.setHeader() would replace any previously set Set-Cookie
+    // header; instead, accumulate into an array.
+    const existing = this.getHeader('Set-Cookie');
+    if (existing == null) {
+      this.setHeader('Set-Cookie', txt);
+    } else if (Array.isArray(existing)) {
+      this.setHeader('Set-Cookie', [...existing, txt]);
+    } else {
+      this.setHeader('Set-Cookie', [existing as string, txt]);
+    }
+
+    return this;
+  },
+
+  download(this: RouterResponse, filepath: string, filename?: string): void {
+    const rReq = this.req as RouterRequest;
+    const name = filename ?? path.basename(filepath);
+    // Use double-quotes and escape any double-quote in the filename per RFC 6266.
+    const safeName = name.replace(/"/g, '\\"');
+    this.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    // Guard: return 404 when the file does not exist (serveFile would send 500
+    // for any stat error; we want the conventional 404 for downloads).
+    fs.access(filepath, fs.constants.F_OK, (err) => {
+      if (err) {
+        if (!this.writableEnded) this.status(404).end('Not Found');
+        return;
+      }
+      serveFile(filepath)(rReq, this, () => { /* no-op */ });
+    });
+  },
+
+  type(this: RouterResponse, mimeType: string): RouterResponse {
+    this.setHeader('Content-Type', mimeType);
+    return this;
+  },
+
+  etag(this: RouterResponse, value: string, strong = false): RouterResponse {
+    this.setHeader('ETag', strong ? `"${value}"` : `W/"${value}"`);
+    return this;
+  },
+
+  header(this: RouterResponse, field: string, value: string | number | string[]): RouterResponse {
+    this.setHeader(field, value);
+    return this;
+  },
+
+  append(this: RouterResponse, field: string, value: string | string[]): RouterResponse {
+    const existing = this.getHeader(field);
+    if (existing == null) {
+      this.setHeader(field, value);
+    } else if (field.toLowerCase() === 'set-cookie') {
+      // Set-Cookie must accumulate as an array (multiple values not comma-joinable).
+      const prev = Array.isArray(existing) ? existing : [String(existing)];
+      const next = Array.isArray(value) ? value : [value];
+      this.setHeader(field, [...prev, ...next]);
+    } else {
+      const prev = Array.isArray(existing) ? existing.join(', ') : String(existing);
+      const added = Array.isArray(value) ? value.join(', ') : value;
+      this.setHeader(field, `${prev}, ${added}`);
+    }
+    return this;
+  },
+
+  vary(this: RouterResponse, field: string | string[]): RouterResponse {
+    const fields = Array.isArray(field) ? field : [field];
+    const existing = this.getHeader('Vary');
+    const current: string[] = existing
+      ? (Array.isArray(existing) ? existing : [String(existing)])
+          .join(', ')
+          .split(',')
+          .map(s => s.trim().toLowerCase())
+      : [];
+    for (const f of fields) {
+      if (!current.includes(f.toLowerCase())) {
+        current.push(f.toLowerCase());
+      }
+    }
+    this.setHeader('Vary', current.join(', '));
+    return this;
+  },
+
+  location(this: RouterResponse, url: string): RouterResponse {
+    this.setHeader('Location', url);
+    return this;
+  },
+
+  clearCookie(this: RouterResponse, name: string, options?: CookieOptions): RouterResponse {
+    const opts: CookieOptions = { ...options, expires: new Date(0), maxAge: 0 };
+    // Remove signed flag — clearing does not need signing.
+    delete opts.signed;
+    this.cookie(name, '', opts);
+    return this;
+  },
+
+  sendStatus(this: RouterResponse, code: number): void {
+    this.setHeader('Content-Type', 'text/plain');
+    this.statusCode = code;
+    this.end(STATUS_MESSAGES[code] ?? String(code));
+  },
+
+  attachment(this: RouterResponse, filename?: string): RouterResponse {
+    if (filename) {
+      const mimeType = mime.lookup(filename, 'application/octet-stream');
+      this.setHeader('Content-Type', mimeType);
+      const safeName = path.basename(filename).replace(/"/g, '\\"');
+      this.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    } else {
+      this.setHeader('Content-Disposition', 'attachment');
+    }
+    return this;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Prototype derivation — one custom prototype per native base, cached
+// ---------------------------------------------------------------------------
+
+/**
+ * Cache of derived prototypes keyed by the object's native prototype. There is
+ * one entry per transport kind (HTTP/1 request, HTTP/1 response, HTTP/2
+ * request, HTTP/2 response), so these maps hold at most a handful of entries
+ * for the lifetime of the process.
+ */
+const reqProtoCache = new WeakMap<object, object>();
+const resProtoCache = new WeakMap<object, object>();
+
+/**
+ * Return a prototype that layers `helpers` on top of `obj`'s current native
+ * prototype, creating and caching it on first use. The returned prototype keeps
+ * every native method (it chains to the original prototype) and adds ours.
+ */
+function ensureProto(cache: WeakMap<object, object>, obj: object, helpers: object): object {
+  const base = Object.getPrototypeOf(obj) as object;
+  let proto = cache.get(base);
+  if (proto === undefined) {
+    proto = Object.assign(Object.create(base) as object, helpers);
+    cache.set(base, proto);
+  }
+  return proto;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP object augmentation
 // ---------------------------------------------------------------------------
 
 /**
- * Augment a raw `http.IncomingMessage` / `http.ServerResponse` pair with the
- * additional fields and helpers expected by router middleware.
+ * Prepare a raw `http.IncomingMessage` / `http.ServerResponse` pair for router
+ * middleware: attach the shared helper prototypes and populate the per-request
+ * data fields the helpers (and the router) rely on.
  *
  * This function is idempotent — it exits immediately when `req.queries` is
- * already defined, so it is safe to call multiple times on the same pair.
+ * already defined, so it is safe to call multiple times on the same pair (as
+ * happens with nested routers sharing one request object).
  *
- * **Fields added to `req`:**
- * - `originalUrl` — the unmodified URL string.
- * - `path`        — the pathname portion of the URL.
- * - `params`      — merged map initialised from URL query parameters.
- * - `queries`     — structured query buckets (`url`, `route`).
- * - `cookies`     — parsed `Cookie` header values.
+ * **Fields added to `req`:** `originalUrl`, `path`, `params`, `query`,
+ * `queries`, `cookies`, `ip`, `ips`, `protocol`, `secure`, `hostname`,
+ * `baseUrl`.  Helper methods (`json`, `text`, `formData`, `header`) come from
+ * the shared request prototype.
  *
- * **Helpers added to `res`:**
- * - `send(data?)`             — write `data` and end the response.
- * - `json(data)`              — serialise to JSON and end.
- * - `status(code, headers?)`  — set the status code and optional headers.
- * - `redirect(url)`           — issue a 302 redirect.
- * - `cookie(name, val, opts)` — append a `Set-Cookie` header.
+ * **Fields added to `res`:** `locals` and the cookie-signing secret (under a
+ * private symbol).  Helper methods (`send`, `json`, `status`, `cookie`,
+ * `download`, …) come from the shared response prototype.
  *
  * @param req         - The raw incoming message to augment.
  * @param res         - The raw server response to augment.
@@ -185,6 +535,11 @@ export function updateHttpObjects(
   const rRes = res as RouterResponse;
 
   if (rReq.queries) return; // Already augmented.
+
+  // Splice the shared helper prototypes into the chain once, before any other
+  // mutation. The helpers read `this`, so no per-request closures are created.
+  Object.setPrototypeOf(req, ensureProto(reqProtoCache, req, requestHelpers));
+  Object.setPrototypeOf(res, ensureProto(resProtoCache, res, responseHelpers));
 
   rReq.queries = {};
 
@@ -270,276 +625,11 @@ export function updateHttpObjects(
     }
   }
 
-  const resolvedReqOpts = (opts?: BodyOptions) => ({
-    limit:   opts?.limit   ?? '100kb',
-    inflate: opts?.inflate ?? true,
-    reviver: null,
-    strict:  opts?.strict  ?? false,
-    // readReqBody takes its expected mimetype as an explicit argument, so the
-    // type matcher here is unused; null keeps the object shape-compatible.
-    type:    null,
-    verify:  opts?.verify  ?? null,
-  });
-
-  rReq.json = (opts?: BodyOptions): Promise<unknown> => {
-    // If a body-parsing middleware already consumed the stream, return the cached value.
-    if ('body' in (rReq as any)) return Promise.resolve((rReq as any).body ?? null);
-    return readReqBody(rReq, resolvedReqOpts(opts), 'application/json', rRes)
-      .then(ret => {
-        if (ret == null) return null;
-        const charset = extractCharset(ret.mimetype);
-        try {
-          const parsed = JSON.parse(
-            ret.content.toString(charset as BufferEncoding),
-            opts?.reviver ?? undefined,
-          );
-          (rReq as any).body = parsed;
-          return parsed;
-        } catch (ex) {
-          return Promise.reject({ status: 400, message: 'Bad Request: ' + (ex as Error).message });
-        }
-      });
-  };
-
-  rReq.text = (opts?: BodyOptions): Promise<string | null> => {
-    // If a body-parsing middleware already consumed the stream, return the cached string.
-    const cached = (rReq as any).body;
-    if (typeof cached === 'string') return Promise.resolve(cached);
-    return readReqBody(rReq, resolvedReqOpts(opts), null, rRes)
-      .then(ret => {
-        if (ret == null) return null;
-        const charset = extractCharset(ret.mimetype);
-        return ret.content.toString(charset as BufferEncoding);
-      });
-  };
-
-  rReq.formData = (opts?: BodyOptions): Promise<FormPart[] | null> => {
-    // If a body-parsing middleware already consumed the stream, return the cached parts.
-    const cached = (rReq as any).body;
-    if (Array.isArray(cached)) return Promise.resolve(cached as FormPart[]);
-    return readReqBody(rReq, resolvedReqOpts(opts), 'multipart/form-data', rRes)
-      .then(ret => {
-        if (ret == null) return null;
-        try {
-          const parts = parseMultipartBody(ret.mimetype, ret.content);
-          (rReq as any).body = parts;
-          return parts;
-        } catch (ex: any) {
-          // console.error('Body Err', ex)
-          return Promise.reject({ status: ex.status ?? 500, message: ex.message ?? String(ex) });
-        }
-      });
-  };
-
-  rReq.header = (name: string): string | string[] | undefined => {
-    const key = name.toLowerCase();
-    // Express treats the two spellings of the referer header as equivalent.
-    if (key === 'referer' || key === 'referrer')
-      return req.headers.referer ?? req.headers.referrer;
-    return req.headers[key];
-  };
-
-  rRes.setHeader('X-Powered-By', 'Expediate');
-
-  rRes.send = (data?: string): void => {
-    if (data) res.write(data);
-    res.end();
-  };
-
-  rRes.json = (data: unknown): void => {
-    res.setHeader('Content-Type', 'application/json');
-    res.write(JSON.stringify(data));
-    res.end();
-  };
-
-  rRes.status = (code: number, headers?: StringMap): typeof rRes => {
-    res.statusCode = code;
-    if (headers)
-      for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
-    return rRes;
-  };
-
-  rRes.redirect = (url: string): void => {
-    res.setHeader('location', url);
-    res.writeHead(302);
-    res.write(`Found. Redirecting to ${url}`);
-    res.end();
-  };
-
-  rRes.cookie = (
-    name: string,
-    value: string | object,
-    options?: CookieOptions,
-  ): typeof rRes => {
-    const opts: CookieOptions = options ?? {};
-
-    // Serialise: objects get the j: prefix so the reader can JSON-decode them.
-    let val =
-      typeof value === 'object' ? 'j:' + JSON.stringify(value) : String(value);
-
-    if (opts.signed) {
-      if (!secret)
-        throw new Error(
-          'Signed cookies require a secret — pass { secret } to createRouter()',
-        );
-      val = signCookieValue(val, secret);
-    }
-
-    // Percent-encode the final value (after any j:/s: wrapping) so special
-    // characters are transmitted safely; decodeCookieValue() reverses it.
-    let txt = `${name}=${encodeCookieValue(val)}`;
-
-    if (opts.maxAge != null) {
-      const maxAgeMs  = opts.maxAge;
-      const maxAgeSec = Math.floor(maxAgeMs / 1000);
-      // Only derive Expires from maxAge when maxAge > 0; a zero maxAge is used
-      // for clearing cookies and the caller may have already set opts.expires
-      // to the epoch — do not overwrite it.
-      if (maxAgeMs > 0) opts.expires = new Date(Date.now() + maxAgeMs);
-      txt += `; Max-Age=${maxAgeSec}`;
-    }
-
-    if (opts.expires)  txt += `; Expires=${opts.expires.toUTCString()}`;
-    txt += `; Path=${opts.path ?? '/'}`;
-    if (opts.httpOnly) txt += '; HttpOnly';
-    if (opts.secure)   txt += '; Secure';
-    if (opts.sameSite) txt += `; SameSite=${opts.sameSite}`;
-
-    // Append rather than overwrite so multiple cookies can be set on the same
-    // response.  res.setHeader() would replace any previously set Set-Cookie
-    // header; instead, accumulate into an array.
-    const existing = res.getHeader('Set-Cookie');
-    if (existing == null) {
-      res.setHeader('Set-Cookie', txt);
-    } else if (Array.isArray(existing)) {
-      res.setHeader('Set-Cookie', [...existing, txt]);
-    } else {
-      res.setHeader('Set-Cookie', [existing as string, txt]);
-    }
-
-    return rRes;
-  };
-
-  rRes.download = (filepath: string, filename?: string): void => {
-    const name = filename ?? path.basename(filepath);
-    // Use double-quotes and escape any double-quote in the filename per RFC 6266.
-    const safeName = name.replace(/"/g, '\\"');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
-    // Guard: return 404 when the file does not exist (serveFile would send 500
-    // for any stat error; we want the conventional 404 for downloads).
-    fs.access(filepath, fs.constants.F_OK, (err) => {
-      if (err) {
-        if (!rRes.writableEnded) rRes.status(404).end('Not Found');
-        return;
-      }
-      serveFile(filepath)(rReq, rRes, () => { /* no-op */ });
-    });
-  };
-
-  rRes.type = (mime: string): typeof rRes => {
-    res.setHeader('Content-Type', mime);
-    return rRes;
-  };
-
-  rRes.etag = (value: string, strong = false): typeof rRes => {
-    res.setHeader('ETag', strong ? `"${value}"` : `W/"${value}"`);
-    return rRes;
-  };
-
+  // Stash the signing secret so res.cookie()/clearCookie() can read it from the
+  // object rather than from a captured closure variable, and link req → res so
+  // the body readers can forward the response to readReqBody's verify hook.
+  (rRes as RouterResponse & SecretCarrier)[kSecret] = secret;
+  (rReq as RouterRequest & ResCarrier)[kRes] = rRes;
   rRes.locals = {};
-
-  rRes.header = (field: string, value: string | number | string[]): typeof rRes => {
-    res.setHeader(field, value);
-    return rRes;
-  };
-
-  rRes.append = (field: string, value: string | string[]): typeof rRes => {
-    const existing = res.getHeader(field);
-    if (existing == null) {
-      res.setHeader(field, value);
-    } else if (field.toLowerCase() === 'set-cookie') {
-      // Set-Cookie must accumulate as an array (multiple values not comma-joinable).
-      const prev = Array.isArray(existing) ? existing : [String(existing)];
-      const next = Array.isArray(value) ? value : [value];
-      res.setHeader(field, [...prev, ...next]);
-    } else {
-      const prev = Array.isArray(existing) ? existing.join(', ') : String(existing);
-      const added = Array.isArray(value) ? value.join(', ') : value;
-      res.setHeader(field, `${prev}, ${added}`);
-    }
-    return rRes;
-  };
-
-  rRes.vary = (field: string | string[]): typeof rRes => {
-    const fields = Array.isArray(field) ? field : [field];
-    const existing = res.getHeader('Vary');
-    const current: string[] = existing
-      ? (Array.isArray(existing) ? existing : [String(existing)])
-          .join(', ')
-          .split(',')
-          .map(s => s.trim().toLowerCase())
-      : [];
-    for (const f of fields) {
-      if (!current.includes(f.toLowerCase())) {
-        current.push(f.toLowerCase());
-      }
-    }
-    res.setHeader('Vary', current.join(', '));
-    return rRes;
-  };
-
-  rRes.location = (url: string): typeof rRes => {
-    res.setHeader('Location', url);
-    return rRes;
-  };
-
-  rRes.clearCookie = (name: string, options?: CookieOptions): typeof rRes => {
-    const opts: CookieOptions = { ...options, expires: new Date(0), maxAge: 0 };
-    // Remove signed flag — clearing does not need signing.
-    delete opts.signed;
-    rRes.cookie(name, '', opts);
-    return rRes;
-  };
-
-  rRes.sendStatus = (code: number): void => {
-    const messages: Record<number, string> = {
-      100: 'Continue', 101: 'Switching Protocols', 102: 'Processing',
-      200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
-      206: 'Partial Content', 207: 'Multi-Status',
-      300: 'Multiple Choices', 301: 'Moved Permanently', 302: 'Found',
-      303: 'See Other', 304: 'Not Modified', 307: 'Temporary Redirect',
-      308: 'Permanent Redirect',
-      400: 'Bad Request', 401: 'Unauthorized', 402: 'Payment Required',
-      403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed',
-      406: 'Not Acceptable', 408: 'Request Timeout', 409: 'Conflict',
-      410: 'Gone', 411: 'Length Required', 413: 'Payload Too Large',
-      415: 'Unsupported Media Type', 422: 'Unprocessable Entity',
-      429: 'Too Many Requests',
-      500: 'Internal Server Error', 501: 'Not Implemented',
-      502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout',
-    };
-    res.setHeader('Content-Type', 'text/plain');
-    res.statusCode = code;
-    res.end(messages[code] ?? String(code));
-  };
-
-  rRes.attachment = (filename?: string): typeof rRes => {
-    if (filename) {
-      const mimeType = mime.lookup(filename, 'application/octet-stream');
-      res.setHeader('Content-Type', mimeType);
-      const safeName = path.basename(filename).replace(/"/g, '\\"');
-      res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
-    } else {
-      res.setHeader('Content-Disposition', 'attachment');
-    }
-    return rRes;
-  };
-
-  // Wrap status() to validate code is an integer in 100–999.
-  const _statusOrig = rRes.status.bind(rRes);
-  rRes.status = (code: number, headers?: StringMap): typeof rRes => {
-    if (!Number.isInteger(code) || code < 100 || code > 999)
-      throw new RangeError(`Invalid status code: ${code}. Must be an integer between 100 and 999.`);
-    return _statusOrig(code, headers);
-  };
+  rRes.setHeader('X-Powered-By', 'Expediate');
 }
