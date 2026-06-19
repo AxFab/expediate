@@ -267,8 +267,9 @@ const requestHelpers = {
           const parts = parseMultipartBody(ret.mimetype, ret.content);
           (this as { body?: unknown }).body = parts;
           return parts;
-        } catch (ex: any) {
-          return Promise.reject({ status: ex.status ?? 500, message: ex.message ?? String(ex) });
+        } catch (ex) {
+          const e = ex as { status?: number; message?: string };
+          return Promise.reject({ status: e.status ?? 500, message: e.message ?? String(ex) });
         }
       });
   },
@@ -562,7 +563,7 @@ export function updateHttpObjects(
   } else {
     rReq.ip       = req.socket?.remoteAddress ?? '';
     rReq.ips      = [];
-    rReq.protocol = (req.socket as any)?.encrypted ? 'https' : 'http';
+    rReq.protocol = (req.socket as { encrypted?: boolean } | undefined)?.encrypted ? 'https' : 'http';
     rReq.hostname = (req.headers.host ?? '').replace(/:\d+$/, '');
   }
   rReq.secure  = rReq.protocol === 'https';

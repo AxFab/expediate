@@ -282,9 +282,9 @@ export function gitHandler(opt: GitHandlerOptions): (req: RouterRequest, res: Ro
           console.warn(`[${service} POST] gunzip error:`, err.message);
           if (!res.writableEnded) res.status(400).send('Failed to decompress request body');
         });
-        (req as any).pipe(gunzip).pipe(proc.stdin);
+        req.pipe(gunzip).pipe(proc.stdin);
       } else {
-        (req as any).pipe(proc.stdin);
+        req.pipe(proc.stdin);
       }
 
       proc.stdout.pipe(res);

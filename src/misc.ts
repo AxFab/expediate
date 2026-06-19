@@ -566,7 +566,7 @@ function readBodyAsPlainText(
 ): void {
   const charset = extractCharset(contentType);
   try {
-    (req as any).body = data.toString(charset as BufferEncoding);
+    req.body = data.toString(charset as BufferEncoding);
     next();
   } catch (ex) {
     res.status(500).send((ex as Error).message);
@@ -607,7 +607,7 @@ function readBodyAsJson(
     if (opts.strict && (typeof parsed !== 'object' || parsed === null)) {
       return void res.status(400).send('Bad Request: JSON body must be an object or array');
     }
-    (req as any).body = parsed;
+    req.body = parsed;
     next();
   } catch (ex) {
     // Invalid JSON is a client error (400), not a server error.
@@ -718,11 +718,11 @@ function readBodyAsFormData(
   data:        Buffer,
 ): void {
   try {
-    (req as any).body = parseMultipartBody(contentType, data);
+    req.body = parseMultipartBody(contentType, data);
     next();
-  } catch (ex: any) {
-    const status = (ex).status ?? 500;
-    res.status(status).send((ex).message ?? String(ex));
+  } catch (ex) {
+    const status = (ex as { status?: number }).status ?? 500;
+    res.status(status).send((ex as Error).message ?? String(ex));
   }
 }
 
@@ -760,7 +760,7 @@ function readBodyAsFormEncoded(
         result[key] = [existing, value];
       }
     }
-    (req as any).body = result;
+    req.body = result;
     next();
   } catch (ex) {
     res.status(400).send('Bad Request: ' + (ex as Error).message);
@@ -1130,7 +1130,7 @@ export function logger(opts?: Partial<LoggerOptions>): Middleware {
     // Capture timestamp and path at request-arrival time so they are stable
     // even if later middleware mutates req.path (e.g. prefix stripping).
     const timestamp   = formatter.format(new Date());
-    const requestPath = req.path ?? (req as any).url ?? '/';
+    const requestPath = req.path ?? req.url ?? '/';
     const ip = req.ip ?? ''
     const user = options.user?.(req) ?? '-';
     const receivedAt = Date.now();

@@ -719,7 +719,7 @@ export function csrf(opts?: CsrfOptions): Middleware {
     // Validate: prefer header, fall back to parsed body field.
     const submitted =
       (req.headers[headerName] as string | undefined) ??
-      ((req as any).body?.[fieldName] as string | undefined) ??
+      ((req.body as Record<string, string> | undefined)?.[fieldName]) ??
       '';
 
     if (!submitted || submitted !== token) {

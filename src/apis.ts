@@ -651,7 +651,7 @@ export function collectRoutes<TInstance extends ServiceInstance = ServiceInstanc
         }
         seen.set(dupKey, controllerName);
 
-        const meta = (handler as any)[DESCRIBE_META] as OperationMeta | undefined;
+        const meta = (handler as { [DESCRIBE_META]?: OperationMeta })[DESCRIBE_META];
 
         routes.push({
           verb,
@@ -1122,7 +1122,7 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
     || (typeof service.validate === 'object' && service.validate.requests !== false);
   /** Schema components shared by the validator and the spec generator. */
   const schemaComponents: Record<string, JsonSchema> = {
-    ...(service as any).openapi?.schemas,
+    ...service.openapi?.schemas,
     ...service.schemas,
   };
 
@@ -1159,10 +1159,10 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
           },
           params: routeParams,
           path:   req.path,
-          user:   (req as any).user,
+          user:   req.user,
           state:  {},
         };
-        const body = (req as any).body;
+        const body = req.body;
 
         // Await instance resolution (no-op microtask for singletons; may
         // trigger async buildModule for keyed / ephemeral instances).
@@ -1229,7 +1229,7 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
     // Register a "not ready" guard first so that requests arriving while
     // setup is in progress receive 503 rather than 404.
     let ready = false;
-    api.use('/', (_req: RouterRequest, res: RouterResponse, next: any): void => {
+    api.use('/', (_req: RouterRequest, res: RouterResponse, next: NextFunction): void => {
       if (!ready) {
         res.statusCode = 503;
         res.end('Service not ready');

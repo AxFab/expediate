@@ -633,7 +633,7 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
   opts:    SpecOptions,
 ): OpenApiDocument {
   const basePath    = opts.basePath ?? '';
-  const svcMeta     = (service as any).openapi as OpenApiServiceMeta | undefined;
+  const svcMeta     = service.openapi;
   const defaultTag  = svcMeta?.tag;
 
   // ── Components ──────────────────────────────────────────────────────────────

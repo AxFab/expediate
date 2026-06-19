@@ -46,6 +46,22 @@ import crypto from 'crypto';
 import type { RouterRequest, RouterResponse, Middleware } from './router.js';
 
 // ---------------------------------------------------------------------------
+// Module augmentation — field added to req by the JWT plugin
+// ---------------------------------------------------------------------------
+
+declare module './router.js' {
+  interface RouterRequest {
+    /**
+     * The decoded access-token payload for the authenticated user, set by the
+     * JWT plugin's {@link JwtPlugin.authenticate} middleware (and cleared at the
+     * start of each `authenticate` run). `undefined` when the request is
+     * unauthenticated.
+     */
+    user?: TokenPayload;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -879,7 +895,7 @@ async function revokeRefreshToken(refreshToken: string, config: JwtConfig): Prom
   const result = verifyToken(refreshToken, refreshVerifyKey(config), config.alg);
   if (!result.valid) return;
 
-  const jti = (result.payload as any).jti as string | undefined;
+  const jti = (result.payload as { jti?: string }).jti;
   if (jti) await config.refreshTokenStore.delete(jti);
 }
 
@@ -1008,7 +1024,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
    */
   const login: Middleware = (req: RouterRequest, res: RouterResponse): void => {
     (async () => {
-      const { username, password } = (req as any).body ?? {};
+      const { username, password } = (req.body ?? {}) as { username?: string; password?: string };
 
       if (!username || !password) {
         sendJson(res, 400, { error: "Fields 'username' and 'password' are required" });
@@ -1047,7 +1063,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
         return;
       }
 
-      const { refreshToken } = (req as any).body ?? {};
+      const { refreshToken } = (req.body ?? {}) as { refreshToken?: string };
 
       if (!refreshToken) {
         sendJson(res, 400, { error: "Field 'refreshToken' is required" });
@@ -1080,7 +1096,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
    */
   const logout: Middleware = (req: RouterRequest, res: RouterResponse): void => {
     (async () => {
-      const { refreshToken } = (req as any).body ?? {};
+      const { refreshToken } = (req.body ?? {}) as { refreshToken?: string };
 
       if (refreshToken && config.refreshTokenStore) {
         await revokeRefreshToken(refreshToken, config);
@@ -1105,7 +1121,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
    */
   const authenticate: Middleware = (req: RouterRequest, res: RouterResponse, next: () => void): void => {
     // Always clear any previously set user to prevent cross-request contamination.
-    delete (req as any).user;
+    delete req.user;
 
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) return next();
@@ -1116,7 +1132,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
 
     if (config.checkIssuer && result.payload.iss !== config.issuer) return next();
 
-    (req as any).user = result.payload;
+    req.user = result.payload;
     next();
   };
 
@@ -1127,7 +1143,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
    * Always place this **after** {@link authenticate}.
    */
   const authorize: Middleware = (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-    if (!(req as any).user) {
+    if (!req.user) {
       sendJson(res, 401, { error: 'Authentication required' });
       return;
     }
@@ -1148,7 +1164,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
     return [
       authenticate,
       (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-        const user = (req as any).user as TokenPayload | undefined;
+        const user = req.user;
         if (!user) {
           sendJson(res, 401, { error: 'Authentication required' });
           return;
@@ -1179,7 +1195,7 @@ export function createJwtPlugin(userConfig: Partial<JwtConfig> = {}): JwtPlugin 
     return [
       authenticate,
       (req: RouterRequest, res: RouterResponse, next: () => void): void => {
-        const user = (req as any).user as TokenPayload | undefined;
+        const user = req.user;
         if (!user) {
           sendJson(res, 401, { error: 'Authentication required' });
           return;
