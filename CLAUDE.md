@@ -102,7 +102,7 @@ Test files in `tests/` use `tsx` at runtime and are never compiled.
 | `middleware.ts`   | `compress`, `requestId`, `rateLimit`, `cacheControl`, `csrf`, `securityHeaders`, `conditionalGet`, types: `CompressOptions`, `RequestIdOptions`, `RateLimitOptions`, `CacheControlOptions`, `CsrfOptions`, `SecurityHeadersOptions` |
 | `jwt-auth.ts`     | `createJwtPlugin`, `createMapTokenStore`, types: `JwtPlugin`, `JwtConfig`, `TokenStore`, `RefreshTokenRecord` |
 | `git.ts`          | `gitHandler`, `gitCreate`, types: `GitHandlerOptions`                      |
-| `apis.ts`         | `apiBuilder`, `defineController`, types: `ApiError`, `ApiContext`, `ServiceMethod`, `ServiceInstance`, `ServiceMethods`, `RouteMap`, `ServiceDefinition`, `ControllerDefinition`, `Guard`, `AuthBinding`, `ValidateOptions`, `ApiRouter`, `ApiRouterExtensions` |
+| `apis.ts`         | `apiBuilder`, `defineController`, types: `ApiError`, `ApiContext`, `ServiceMethod`, `ServiceInstance`, `ServiceMethods`, `RouteMap`, `ServiceDefinition`, `ControllerDefinition`, `Guard`, `AuthBinding`, `ApiBuilderOptions`, `ApiRouter`, `ApiRouterExtensions` |
 | `openapi.ts`      | `describe`, `openApiSpec`, `serializeSpec`, `DESCRIBE_META`, types: `JsonSchema`, `ParameterObject`, `RequestBodyObject`, `ResponseObject`, `OperationMeta`, `OpenApiServiceMeta`, `SpecOptions`, `SpecFormat`, `OpenApiDocument` |
 
 Note: `cors` is exported from `misc` but **not documented in the README**. `extractCharset`
@@ -476,7 +476,7 @@ interface ServiceDefinition<TInstance> {
   controllers?: ControllerDefinition<TInstance>[];  // merged sub-controllers
   guards?:      Guard[];                            // run before every handler
   auth?:        AuthBinding;                        // authenticate + check + spec scheme
-  validate?:    boolean | ValidateOptions;          // enforce requestBody schemas
+  validate?:    boolean | ApiBuilderOptions;        // enforce requestBody schemas
   schemas?:     Record<string, JsonSchema>;         // shared validator/spec components
 
   // Root route maps — form an implicit controller with no prefix
@@ -828,9 +828,12 @@ Open items identified from source comments:
 3. **`gitCreate` JSDoc** (`git.ts`): The `gitCreate` function has an incomplete
    JSDoc comment (the `@param` and `@returns` tags are missing).
 
-4. **Response validation** (`apis.ts`): `validate.responses` (e.g. `'warn'` in
-   dev) was considered in the v2 design (`docs/api-builder-v2-design.md` §12.3)
-   but deliberately not implemented — only request validation exists.
+4. ~~Response validation~~ — **implemented**: `apiBuilder(service, { responses: true })`
+   validates each handler's return against the route's declared `responses['200']`
+   schema (default off). A mismatch is a server-contract breach → `500`. The
+   builder's optional second argument (`ApiBuilderOptions`) also makes request
+   validation default-on (`{ requests: false }` cancels it) and overrides the
+   legacy `service.validate` field when present.
 
 **Resolved items (no longer open):**
 
@@ -942,7 +945,7 @@ interface ServiceDefinition<TInstance>
 interface ControllerDefinition<TInstance>  // { prefix?, tags?, guards?, permission?, GET?, ... }
 type Guard                 // (ctx, req) => void | object | Promise<...>
 interface AuthBinding<TUser>  // { authenticate?, check?, scheme?, permissionsExtension? }
-interface ValidateOptions  // { requests? }
+interface ApiBuilderOptions  // { validateRequests?, validateResponses?: boolean | 'warn' }
 type ServiceMethod<TInstance>
 type ServiceMethods<TInstance>
 type RouteMap<TInstance>

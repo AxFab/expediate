@@ -30,6 +30,7 @@ import type {
   OperationMeta,
   JsonSchema,
   RequestBodyObject,
+  ResponseObject,
 } from './openapi.js';
 
 // ---------------------------------------------------------------------------
@@ -313,16 +314,47 @@ export interface AuthBinding<TUser = unknown> {
 }
 
 /**
- * Options controlling runtime validation of declared request schemas.
+ * Validation controls for {@link apiBuilder}.
  *
- * Enabled via `ServiceDefinition.validate` (pass `true` for defaults).
+ * Used both as the factory's optional second argument and as the object form of
+ * the {@link ServiceDefinition.validate} field. When passed as the second
+ * argument it is authoritative and overrides `service.validate`:
+ *
+ * ```ts
+ * apiBuilder(service);                                 // follows service.validate
+ * apiBuilder(service, {});                              // validate requests (default), not responses
+ * apiBuilder(service, { validateRequests: false });    // validate nothing
+ * apiBuilder(service, { validateResponses: true });    // requests + responses (500 on mismatch)
+ * apiBuilder(service, { validateResponses: 'warn' });  // requests + responses (log only, no 500)
+ * ```
  */
-export interface ValidateOptions {
+export interface ApiBuilderOptions {
   /**
-   * Validate request bodies against `OperationMeta.requestBody` schemas.
-   * Failures produce `400` with `{ message, fieldErrors }`.  Default `true`.
+   * Validate incoming request bodies against each route's declared
+   * `OperationMeta.requestBody` schema. Failures produce `400` with
+   * `{ message, fieldErrors }`.
+   *
+   * @default true — pass `false` to cancel the incoming-data check.
    */
-  requests?: boolean;
+  validateRequests?: boolean;
+
+  /**
+   * Validate each handler's return value against the route's declared
+   * `OperationMeta.responses['200']` schema before it is sent.
+   *
+   * - `true`  — a mismatch is a server-contract breach: the off-spec body is
+   *   **not** sent; instead a `500` with `{ message, fieldErrors }` is returned.
+   * - `'warn'` — a mismatch is logged server-side via `console.warn` and the
+   *   response is sent unchanged (handy in development).
+   * - `false` — no response checking.
+   *
+   * Only truthy returns (sent as `200` JSON) are checked; falsy returns
+   * (`201 No Content`) and routes without a declared `200` response schema are
+   * skipped.
+   *
+   * @default false
+   */
+  validateResponses?: boolean | 'warn';
 }
 
 /**
@@ -460,13 +492,18 @@ export interface ServiceDefinition<TInstance extends ServiceInstance = ServiceIn
   auth?: AuthBinding;
 
   /**
-   * Enable runtime validation of declared request schemas.
+   * Enable runtime validation of declared schemas.
    *
-   * When truthy, request bodies are validated against the JSON Schema found
-   * in each route's `OperationMeta.requestBody` before the handler runs.
-   * Failures produce `400` with `{ message, fieldErrors }`.
+   * - `true` — validate request bodies against each route's
+   *   `OperationMeta.requestBody` schema (`400` with `{ message, fieldErrors }`
+   *   on failure).
+   * - An {@link ApiBuilderOptions} object — fine-grained control over request
+   *   and response validation.
+   *
+   * Overridden when an {@link ApiBuilderOptions} object is passed as the second
+   * argument to {@link apiBuilder}.
    */
-  validate?: boolean | ValidateOptions;
+  validate?: boolean | ApiBuilderOptions;
 
   /**
    * Reusable JSON Schema components, shared by request validation and spec
@@ -886,6 +923,49 @@ function validateRequestBody(
   }
 }
 
+/**
+ * Validate a handler's return value against the route's declared response
+ * schema for `status`.
+ *
+ * Only acts when the route declares a response for that status with a content
+ * schema (the `application/json` entry is preferred, otherwise the first
+ * declared content entry). A violation means the server is about to emit a body
+ * that breaks its own published contract:
+ *
+ * - `mode === true`  → raise a `500` {@link ApiError} (the off-spec body is not
+ *   sent).
+ * - `mode === 'warn'` → log via `console.warn` and return so the response is
+ *   sent unchanged.
+ *
+ * @throws An {@link ApiError} (`status: 500`) when `mode === true` and the
+ *   value fails validation.
+ */
+function validateResponseBody(
+  responses:  Record<string, ResponseObject>,
+  status:     number,
+  value:      unknown,
+  components: Record<string, JsonSchema>,
+  mode:       true | 'warn',
+): void {
+  const response = responses[String(status)] ?? responses.default;
+  const content  = response?.content?.['application/json']
+    ?? Object.values(response?.content ?? {})[0];
+  const schema   = content?.schema;
+  if (!schema) return;
+
+  const fieldErrors = validateSchema(value, schema, components);
+  if (Object.keys(fieldErrors).length === 0) return;
+
+  if (mode === 'warn') {
+    console.warn('[apiBuilder] response body validation failed:', fieldErrors);
+    return;
+  }
+  throw {
+    status: 500,
+    data: { message: 'Response body validation failed', fieldErrors },
+  } satisfies ApiError;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -1076,11 +1156,22 @@ function sendError(res: RouterResponse, err: unknown): void {
  *   as a JSON body.
  * - Any other thrown value produces `500 Internal Server Error`.
  *
+ * **Validation:**
+ * - With no `options`, validation follows the {@link ServiceDefinition.validate}
+ *   field.
+ * - With `options`, request validation defaults **on** (cancel via
+ *   `{ validateRequests: false }`) and response validation can be enabled with
+ *   `{ validateResponses: true }` (500 on mismatch) or `{ validateResponses:
+ *   'warn' }` (log only). See {@link ApiBuilderOptions}.
+ *
  * @param service - The service definition (see {@link ServiceDefinition}).
+ * @param options - Optional validation controls (see {@link ApiBuilderOptions}).
+ *   When provided, it overrides the legacy `service.validate` field.
  * @returns A router instance pre-configured with all declared routes.
  */
 export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
   service: ServiceDefinition<TInstance>,
+  options?: ApiBuilderOptions,
 ): ApiRouter {
   const api      = createRouter() as ApiRouter;
   /** Resolved instance cache: populated once setup completes for a given key. */
@@ -1118,8 +1209,16 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
   const check = service.auth?.check ?? defaultCheck;
 
   // ── Validation configuration ─────────────────────────────────────────────
-  const validateRequests = service.validate === true
-    || (typeof service.validate === 'object' && service.validate.requests !== false);
+  // The second argument, when given, is authoritative; otherwise fall back to
+  // the `service.validate` field. Both share the ApiBuilderOptions shape:
+  // request validation defaults ON for an options object, responses default OFF.
+  // A bare `service.validate: true` enables requests only; absent means neither.
+  const validation = options ?? service.validate;
+  const validateRequests =
+    validation === true ||
+    (typeof validation === 'object' && validation.validateRequests !== false);
+  const validateResponses: boolean | 'warn' =
+    typeof validation === 'object' ? validation.validateResponses ?? false : false;
   /** Schema components shared by the validator and the spec generator. */
   const schemaComponents: Record<string, JsonSchema> = {
     ...service.openapi?.schemas,
@@ -1186,10 +1285,14 @@ export function apiBuilder<TInstance extends ServiceInstance = ServiceInstance>(
 
             // 6 + 7. Handler invocation and response conventions.
             const val = await route.handler.apply(instance, [ctx, body]);
-            if (val !== undefined && val !== null && val !== false && val !== 0 && val !== '')
+            if (val !== undefined && val !== null && val !== false && val !== 0 && val !== '') {
+              // Optional response-schema validation (server-contract check).
+              if (validateResponses && route.meta?.responses)
+                validateResponseBody(route.meta.responses, 200, val, schemaComponents, validateResponses);
               sendJson(res, val);
-            else
+            } else {
               res.status(201).end();
+            }
           })
           .catch(err => {
             // Optional service-level hook: inspect/log and optionally remap the

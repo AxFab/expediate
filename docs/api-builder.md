@@ -116,7 +116,7 @@ interface ServiceDefinition<TInstance> {
   controllers?: ControllerDefinition<TInstance>[];
   guards?:      Guard[];
   auth?:        AuthBinding;
-  validate?:    boolean | ValidateOptions;
+  validate?:    boolean | ApiBuilderOptions;
   schemas?:     Record<string, JsonSchema>;
 
   // Root route maps (form an implicit controller with no prefix)
@@ -381,6 +381,33 @@ When enabled, the body is checked against the route's `requestBody` schema befor
 ```
 
 Supported keywords: `type`, `required`, `properties`, `items`, `enum`, `pattern`, `minLength`/`maxLength`, `minimum`/`maximum`, `additionalProperties`, `allOf`/`anyOf`/`oneOf`, and `$ref` resolved against `ServiceDefinition.schemas`. Field-error paths are dotted (`name`, `address.city`, `tags.0`); errors on the body itself are keyed `'$'`.
+
+---
+
+## Builder options: `apiBuilder(service, options?)`
+
+`apiBuilder` takes an optional second argument, `ApiBuilderOptions`, that controls validation. When you pass it, it is authoritative and overrides the `service.validate` field (which accepts the same `boolean | ApiBuilderOptions` shape):
+
+```ts
+apiBuilder(service);                                // follows service.validate
+apiBuilder(service, {});                             // validate requests (default on), not responses
+apiBuilder(service, { validateRequests: false });    // validate nothing
+apiBuilder(service, { validateResponses: true });    // requests + responses (500 on mismatch)
+apiBuilder(service, { validateResponses: 'warn' });  // requests + responses (log only, no 500)
+```
+
+`ApiBuilderOptions`:
+
+| Field               | Type               | Default | Effect |
+|---------------------|--------------------|---------|--------|
+| `validateRequests`  | `boolean`          | `true`  | Check incoming bodies against `requestBody` schemas. `false` cancels it. Failure → `400`. |
+| `validateResponses` | `boolean \| 'warn'`| `false` | Check each handler's return against the route's `responses['200']` schema. `true` → `500` on mismatch (off-spec body not sent); `'warn'` → log via `console.warn` and send anyway. |
+
+Response validation is a **server-contract** check: a handler returning data that violates its own declared `200` schema means the *server* is at fault. With `true`, a mismatch yields `500 { message: 'Response body validation failed', fieldErrors }` instead of emitting an off-spec body; with `'warn'`, it logs server-side and sends the response unchanged (handy in development). Only truthy returns (sent as `200`) are checked — falsy returns (`201 No Content`) and routes with no declared `200` content schema are skipped. It uses the same validator and `fieldErrors` shape as request validation.
+
+```ts
+const api = apiBuilder(todoService, { validateResponses: true });
+```
 
 ---
 

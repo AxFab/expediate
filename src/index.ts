@@ -98,7 +98,7 @@ export type {
     ControllerDefinition,
     Guard,
     AuthBinding,
-    ValidateOptions,
+    ApiBuilderOptions,
     ApiRouter,
     ApiRouterExtensions,
     ApiContext,

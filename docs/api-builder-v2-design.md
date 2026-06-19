@@ -154,7 +154,7 @@ export interface ServiceDefinition<TInstance extends ServiceInstance = ServiceIn
   /** NEW — authentication/authorization binding (see P3). */
   auth?: AuthBinding;
   /** NEW — runtime validation of declared request schemas (see P4). */
-  validate?: boolean | ValidateOptions;
+  validate?: boolean | ApiBuilderOptions;
   /** NEW — schema components, shared by validation and spec generation. */
   schemas?: Record<string, JsonSchema>;
 
@@ -347,10 +347,11 @@ says nothing about auth at all.
 ## 7. P4 — Request validation from declared schemas
 
 ```ts
-export interface ValidateOptions {
-  /** Validate request bodies against `meta.requestBody` schemas. Default true. */
-  requests?: boolean;
-  /** Validation failure response: 400 with `{ message, fieldErrors }`. */
+export interface ApiBuilderOptions {
+  /** Validate request bodies against `meta.requestBody` schemas (400 on failure). Default true. */
+  validateRequests?: boolean;
+  /** Validate handler returns against `meta.responses['200']`: true → 500, 'warn' → log only. Default false. */
+  validateResponses?: boolean | 'warn';
 }
 ```
 
@@ -633,9 +634,10 @@ from `src/index.ts`, tests per step in `tests/apis.test.ts` (and a new
 2. **Controllers don't need their own `scope`?**
    instance lifecycle stays API-wide. A controller needing its own state is
    a sign it should be a separately mounted API.
-3. **Response validation** (`validate.responses: 'warn'`) — useful in dev,
-   but doubles validator surface. Will be activated only with an options
-   give to the apiBuilder.
+3. **Response validation** — useful in dev, but doubles validator surface.
+   Implemented as opt-in via the `apiBuilder(service, { responses: true })`
+   options argument (default off); a return that violates the route's declared
+   `200` schema yields `500` (server-contract breach).
 4. **`x-required-permissions` naming** — vendor extension vs. OpenAPI
    `security` scopes on a custom scheme. Extension is simpler and honest
    (these are not OAuth scopes); the name of the header can be overwrite

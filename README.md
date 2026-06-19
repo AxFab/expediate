@@ -455,6 +455,12 @@ const api = apiBuilder({
 
 Duplicate `(verb, path)` pairs across controllers **throw at build time** instead of silently shadowing.
 
+`apiBuilder(service, options?)` takes an optional second argument (`ApiBuilderOptions`) to control validation. When provided it overrides `service.validate`: `validateRequests` defaults **on** (cancel with `{ validateRequests: false }`) and `validateResponses` opts in to checking each handler's return against its declared `200` schema — `true` returns `500` on a mismatch (the server's fault), `'warn'` only logs it:
+
+```ts
+apiBuilder(service, { validateResponses: true }); // validate both incoming bodies and outgoing responses
+```
+
 ---
 
 ## OpenAPI spec generation
@@ -552,7 +558,7 @@ import type {
 // API builder + OpenAPI
 import type {
   ServiceDefinition, ServiceMethod, ServiceMethods, RouteMap, ApiError,
-  ApiContext, ControllerDefinition, Guard, AuthBinding, ValidateOptions,
+  ApiContext, ControllerDefinition, Guard, AuthBinding, ApiBuilderOptions,
   OperationMeta, OpenApiServiceMeta, SpecOptions, OpenApiDocument,
 } from 'expediate';
 

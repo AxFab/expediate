@@ -615,8 +615,8 @@ testDescribe('Request validation — HTTP pipeline', () => {
     assert.equal(r.statusCode, 200, 'no validate option → schema not enforced');
   });
 
-  it('validate: { requests: false } disables request validation', async () => {
-    const r = await request(makeService({ requests: false }), {
+  it('validate: { validateRequests: false } disables request validation', async () => {
+    const r = await request(makeService({ validateRequests: false }), {
       method: 'POST', path: '/items', body: { name: 'Bad Name' },
     });
     assert.equal(r.statusCode, 200);
@@ -629,5 +629,103 @@ testDescribe('Request validation — HTTP pipeline', () => {
     };
     const r = await request(service, { method: 'POST', path: '/free', body: { anything: 1 } });
     assert.equal(r.statusCode, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite 7 — apiBuilder(service, options): request + response validation
+// ---------------------------------------------------------------------------
+
+testDescribe('apiBuilder options — request & response validation', () => {
+  const userSchema: JsonSchema = {
+    type: 'object',
+    required: ['id', 'name'],
+    properties: { id: { type: 'integer' }, name: { type: 'string' } },
+    additionalProperties: false,
+  };
+
+  /** Service whose handler echoes back whatever `handlerReturn` is. */
+  const makeService = (handlerReturn: unknown): ServiceDefinition => ({
+    schemas: { User: userSchema },
+    POST: {
+      '/users': describe(() => handlerReturn, {
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/User' } } },
+        },
+        responses: {
+          '200': {
+            description: 'the created user',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/User' } } },
+          },
+        },
+      }),
+    },
+  });
+
+  const validUser = { id: 1, name: 'alice' };
+
+  it('response validation is OFF by default — an off-spec return still goes out', async () => {
+    const api = apiBuilder(makeService({ id: 'not-a-number' }), {});
+    const r = await requestRouter(api, { method: 'POST', path: '/users', body: validUser });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(r.json(), { id: 'not-a-number' });
+  });
+
+  it('validateResponses: true — a schema-conformant return is sent as 200', async () => {
+    const api = apiBuilder(makeService(validUser), { validateResponses: true });
+    const r = await requestRouter(api, { method: 'POST', path: '/users', body: validUser });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(r.json(), validUser);
+  });
+
+  it('validateResponses: true — an off-spec return → 500 { message, fieldErrors }', async () => {
+    const api = apiBuilder(makeService({ id: 'oops' }), { validateResponses: true });
+    const r = await requestRouter(api, { method: 'POST', path: '/users', body: validUser });
+    assert.equal(r.statusCode, 500);
+    const err = r.json<any>();
+    assert.equal(err.message, 'Response body validation failed');
+    assert.ok(err.fieldErrors.id, 'id type mismatch reported');
+    assert.equal(err.fieldErrors.name, 'is required');
+  });
+
+  it("validateResponses: 'warn' — off-spec return is logged but still sent (200)", async () => {
+    const warnings: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    try {
+      const api = apiBuilder(makeService({ id: 'oops' }), { validateResponses: 'warn' });
+      const r = await requestRouter(api, { method: 'POST', path: '/users', body: validUser });
+      assert.equal(r.statusCode, 200);
+      assert.deepEqual(r.json(), { id: 'oops' });
+    } finally {
+      console.warn = origWarn;
+    }
+    assert.equal(warnings.length, 1, 'one warning logged');
+    assert.ok(String(warnings[0][0]).includes('response body validation failed'));
+  });
+
+  it('validateResponses: true — a route with no declared 200 schema is not response-checked', async () => {
+    const service: ServiceDefinition = {
+      POST: { '/free': describe(() => ({ whatever: true }), {}) },
+    };
+    const api = apiBuilder(service, { validateResponses: true });
+    const r = await requestRouter(api, { method: 'POST', path: '/free', body: {} });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(r.json(), { whatever: true });
+  });
+
+  it('passing options turns request validation ON by default — bad body → 400', async () => {
+    const api = apiBuilder(makeService(validUser), {});
+    const r = await requestRouter(api, { method: 'POST', path: '/users', body: { id: 'x' } });
+    assert.equal(r.statusCode, 400);
+    assert.equal(r.json<any>().message, 'Request body validation failed');
+  });
+
+  it('validateRequests: false cancels the incoming-data check', async () => {
+    const api = apiBuilder(makeService(validUser), { validateRequests: false });
+    const r = await requestRouter(api, { method: 'POST', path: '/users', body: { id: 'x' } });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(r.json(), validUser);
   });
 });
