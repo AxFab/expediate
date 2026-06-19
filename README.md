@@ -42,7 +42,9 @@
 npm install expediate
 ```
 
-Node.js ≥ 18 is required. The package ships as native ESM with full TypeScript declarations and a CommonJS compatibility bundle.
+Node.js ≥ 18.20.0 is required — the floor where `with { type: 'json' }` JSON import attributes exist (the ESM build uses one for `mimetypes.json`); on 18.20.0–18.20.4, 20.10.0–20.18.2, and all of 21.x, Node logs an `ExperimentalWarning` for that syntax but runs fine. For a warning-free run, use Node ≥ 18.20.5, ≥ 20.18.3, or ≥ 22.12.0. The package ships as native ESM with full TypeScript declarations and a CommonJS compatibility bundle (the CJS build is bundled with esbuild specifically so this JSON import works under `require()` too).
+
+**Bun / Deno:** not officially tested, but likely to work with caveats. Both runtimes support `with { type: 'json' }` and the package's `exports` map resolves cleanly under either. The main risk area is `src/router.ts`'s use of `node:http2.createSecureServer` and raw socket fields (`req.socket.setTimeout`, `req.socket.remoteAddress`, `req.socket.encrypted`) for HTTP/2 + TLS: Bun's `node:http2` server support has known gaps (no `allowHTTP1`, no `enableConnectProtocol`, no ALPN-based push), and Deno's `node:http2` compatibility, while improving, is newer and less battle-tested than its `node:http`. Plain HTTP/HTTPS routes are the safer bet on either runtime.
 
 ---
 

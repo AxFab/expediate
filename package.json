@@ -37,7 +37,9 @@
   ],
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', {recursive:true,force:true})\"",
-    "build": "tsc && node scripts/build-cjs.cjs",
+    "build": "npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc",
+    "build:cjs": "node scripts/build-cjs.cjs",
     "test": "node --import tsx --test 'tests/*.test.ts'",
     "test:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-exclude='tests/**' 'tests/*.test.ts'",
     "fuzz": "node --import tsx --test 'tests/*.fuzz.test.ts'",
@@ -45,7 +47,7 @@
     "bench:check": "npm run bench:check --workspace benchmarks",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "prepack": "npm run lint && npm run test && npm pack --dry-run"
+    "prepack": "npm run lint && npm run test && npm run build && npm pack --dry-run"
   },
   "workspaces": [
     "benchmarks",
@@ -68,5 +70,8 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.61.1"
+  },
+  "engines": {
+    "node": ">=18.20.0"
   }
 }

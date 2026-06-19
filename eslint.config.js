@@ -1,4 +1,4 @@
-// eslint.config.mjs — flat config for the Expediate framework.
+// eslint.config.js — flat config for the Expediate framework.
 //
 // Goals:
 //  - Type-aware linting (catches real bugs: floating promises, misused
@@ -119,7 +119,7 @@ export default tseslint.config(
   // 6. The config file itself isn't part of the TS program — disable type-aware
   //    rules for it to avoid "not found in project" parsing errors.
   {
-    files: ['eslint.config.mjs'],
+    files: ['eslint.config.js'],
     extends: [tseslint.configs.disableTypeChecked],
   },
 );

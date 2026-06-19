@@ -79,7 +79,7 @@ only. There are no runtime npm dependencies whatsoever.
 
 - **Package type:** ESM-first (`"type": "module"`) with a CJS compatibility shim
 - **Version:** 1.0.4
-- **Build:** `tsc` (ESM) + `node scripts/build-cjs.cjs` (CJS bundle via esbuild) → outputs to `./dist/`
+- **Build:** `npm run build:esm` (`tsc`) + `npm run build:cjs` (`node scripts/build-cjs.cjs`, CJS bundle via esbuild) → outputs to `./dist/`. `npm run build` runs both.
 - **Test runner:** `node --import tsx --test 'tests/*.test.ts'`
 - **TypeScript version:** 5.9.3 (strict mode, isolatedModules, esModuleInterop)
 - **tsconfig target:** ESNext, module NodeNext
