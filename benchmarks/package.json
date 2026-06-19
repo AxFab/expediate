@@ -10,7 +10,8 @@
     "bench:check": "node --import tsx run.ts && node --import tsx compare.ts"
   },
   "dependencies": {
-    "autocannon": "^8.0.0",
+    "autocannon": "^2.0.1",
+    "esbuild": "0.28.1",
     "express": "^5.1.0",
     "fastify": "^5.2.0"
   },
