@@ -18,8 +18,13 @@ All notable changes to **expediate** are documented here.
 - **Routing** — `router.route(path)` fluent builder for registering several HTTP methods against one path
 - **Method handling** — `HEAD` requests are now served by the matching `GET` handler (body suppressed); unhandled `OPTIONS` on a registered path replies `204` with an `Allow` header; the `405`/OPTIONS `Allow` headers advertise `HEAD` (when a `GET` exists) and `OPTIONS`. Explicit `use()`/`all()` handlers and `cors()` still take precedence
 - **Routing** — `head()` and `options()` registration helpers (on the router and the `route()` builder) for method-specific `HEAD`/`OPTIONS` handlers
+- **Error handling** — `router.error()` registers an ordered, forwardable error-middleware chain (`(err, req, res, next)`); when exhausted it falls back to the single `onError()` handler and then **bubbles to the parent router**, so a root handler can catch failures from deeply nested sub-routers. `apiBuilder` adds a `ServiceDefinition.onError(err, ctx, req)` hook. `ErrorMiddleware` type exported
+- **Response helpers** — `res.append()`, `res.vary()`, `res.location()`, `res.clearCookie()`, `res.sendStatus()`, `res.attachment()`, and a per-response `res.locals` object
 - **Headers** — `req.header(name)` (case-insensitive request-header lookup, `referer`/`referrer` equivalent) and chainable `res.header(field, value)`
+- **Route safety** — `RegExp` routes that use the `g` (global) or `y` (sticky) flag are now rejected at registration; those flags make `exec()` stateful and cause intermittent, hard-to-debug `404`s. Inline `:name(constraint)` patterns are scanned so regex metacharacters inside them are no longer mistaken for glob wildcards
 - **Cookies** — `res.cookie()` now percent-encodes values (after any `j:`/`s:` wrapping) so semicolons, commas, spaces, quotes, and backslashes transmit safely; cookie parsing de-quotes (RFC 6265 quoted-string) and percent-decodes values before interpreting `j:`/`s:` prefixes. Signed-cookie HMAC remains computed over the unencoded value
+- **Response validation** — `apiBuilder` accepts an optional second argument, `ApiBuilderOptions`, controlling validation. `validateResponses` checks each handler's return against its declared `responses['200']` schema: `true` returns `500 { message, fieldErrors }` when the server would emit an off-spec body, `'warn'` logs the mismatch via `console.warn` and sends the response unchanged. `validateRequests` (default on) toggles the existing request check. `ServiceDefinition.validate` accepts the same `boolean | ApiBuilderOptions` shape
+- **MIME types** — bundled `src/mimetypes.json` table expanded with hundreds of additional extensions
 - `ErrorHandler` and `RouteInfo` types re-exported from the public API
 - `TokenPayload` and `UserRecord` types re-exported from the public API
 - `CorsOptions` type re-exported from the public API
@@ -28,10 +33,26 @@ All notable changes to **expediate** are documented here.
 ### Changed
 - **Breaking:** a duplicate `(verb, path)` route pair now **throws at build time** in `apiBuilder` / `openApiSpec` (was silent shadowing)
 - **Breaking (compile-time):** `ApiContext.user` defaults to `unknown` instead of `any`
+- **Breaking (compile-time):** `RouterRequest.body` is now typed `unknown` instead of `any` — narrow it before use (e.g. `req.body as { id: string }`)
+- `req.user` is now typed (`TokenPayload`) on `RouterRequest` when the JWT plugin is loaded, instead of requiring an `as any` cast
 - `ServiceDefinition.schemas` supersedes `SpecOptions.schemas` on name conflicts (the spec-options form is kept as a fallback)
 
+### Removed
+- **Breaking:** `router.setNotFound()` and the not-found handler hook. Register a catch-all layer **last** instead — `app.all('/**', (req, res) => …)` — which matches in registration order and, unlike `setNotFound()`, also fires correctly inside mounted sub-routers. The built-in `Cannot METHOD /path` 404 remains the default fallback
+
+### Performance
+- Per-request `req`/`res` helpers are now defined once on shared prototypes and attached via `Object.setPrototypeOf` instead of allocating ~20 closures on every request; the `status()` range check was folded into the single prototype method (removing a second per-request allocation)
+
 ### Fixed
-- Several minor fixes and test reliability improvements
+- Body parsing no longer returns `415` when a parser's content type doesn't match — it passes through to the next middleware, so parser stacks (`json()` + `formEncoded()` + …) compose correctly
+- Static file serving hardened against control characters in the path and corrected path-handling edge cases
+- Consistent method-routing behaviour (`HEAD`/`OPTIONS`/`405`) across registered and unregistered paths
+- Misc. test-reliability improvements
+
+### Internal / Tooling
+- Split the ~2,200-line `src/router.ts` into `router.ts` + `router-types.ts` (type declarations) + `http-objects.ts` (req/res augmentation and cookie helpers); the public API and exports are unchanged
+- Added a type-aware ESLint flat config (`eslint.config.js`) and `tsconfig.eslint.json`; `npm run lint` now passes. Reduced `any` usage across `src/`
+- Bumped `esbuild` (build-time dev dependency) to resolve security advisories; pruned stale repo files (`AUDIT.md`, duplicate `docs/middlewares.md`)
 
 ---
 
