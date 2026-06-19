@@ -9,14 +9,14 @@
     "strict": true,
 
     // File Layout
-    // "rootDir": ".",
+    // "rootDir": "./src",
 
     // Environment Settings
     // See also https://aka.ms/tsconfig/module
     // "types": [],
     // For nodejs:
     // "lib": ["esnext"],
-    // "types": ["node"],
+    "types": ["node"],
     // and npm install -D @types/node
 
     // Other Outputs

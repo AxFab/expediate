@@ -1017,7 +1017,6 @@ function sendJson(res: RouterResponse, data: unknown): void {
  * @param err - The caught value.
  */
 function sendError(res: RouterResponse, err: unknown): void {
-  // console.error('Api Err', err)
   const e = err as ApiError | undefined;
   const status = e?.status ?? 500;
   if (e?.data !== undefined) {

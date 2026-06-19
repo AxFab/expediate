@@ -137,9 +137,18 @@ export interface RouterRequest extends http.IncomingMessage {
    */
   cookies: Record<string, unknown>;
   /**
+   * The parsed request body, or `undefined` until something populates it.
    *
+   * It is set by a body-parsing middleware run ahead of the handler
+   * (`json()`, `formData()`, `formEncoded()`, `parseBody()`, …) or, on first
+   * call, cached by the promise-based readers {@link RouterRequest.json},
+   * {@link RouterRequest.text}, and {@link RouterRequest.formData}.
+   *
+   * Typed as `unknown` because the shape depends on the parser used (a parsed
+   * JS value for JSON, a `string` for text, `FormPart[]` for multipart).
+   * Narrow it before use, e.g. `const { name } = req.body as { name: string }`.
    */
-  body?: any;
+  body?: unknown;
 
   /**
    * Alias for `req.queries.url` — the parsed URL query-string parameters.

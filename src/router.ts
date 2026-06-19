@@ -601,7 +601,6 @@ function createRouter(
           try {
             errorHandler(err, req, res);
           } catch {
-            // console.error('Root Err', e2)
             if (!res.writableEnded) res.status(500).end(`Error ${method} ${url}`);
           }
           return;
@@ -614,7 +613,6 @@ function createRouter(
         }
 
         // 4. Top-level router with no handler: default 500.
-        console.warn(err);
         res.status(500).end(`Error ${method} ${url}`);
       };
 
