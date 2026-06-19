@@ -7,7 +7,10 @@
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist",
+    "dist/",
+    "docs/",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
     "LICENSE",
     "README.md"
   ],
