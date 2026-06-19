@@ -492,7 +492,11 @@ function extractRouterPrefix(arg: MiddlewareArg): string | undefined {
  *
  * app.use(v1);
  * app.onError((err, _req, res) => res.status(500).json({ error: String(err) }));
- * app.setNotFound((_req, res) => res.status(404).json({ error: 'Not Found' }));
+ *
+ * // Custom 404: register a catch-all as the LAST layer. Because layers match
+ * // in registration order, it only runs when nothing earlier claimed the
+ * // request. Use `all('/**', …)` (glob) to match any method and path.
+ * app.all('/**', (_req, res) => res.status(404).json({ error: 'Not Found' }));
  *
  * app.listen(3000, () => console.log('Listening'));
  * process.on('SIGTERM', () => app.shutdown(10_000));
@@ -516,8 +520,6 @@ function createRouter(
   const errorHandlers: ErrorMiddleware[] = [];
   /** Terminal fallback registered via `router.onError()`, or `undefined`. */
   let errorHandler:    ErrorHandler | undefined;
-  /** Currently registered not-found handler, or `undefined` for the default 404. */
-  let notFoundHandler: Middleware   | undefined;
 
   /** Server created by `router.listen()`, used by `router.shutdown()`. */
   let activeServer: http.Server | https.Server | http2.Http2SecureServer | null = null;
@@ -532,7 +534,7 @@ function createRouter(
    * Core dispatch function. Walks the route table in registration order and
    * invokes the first layer that matches the current request.
    *
-   * - **404** (or custom `setNotFound` handler) — no layer's path matched.
+   * - **404** — no layer's path matched (register a catch-all last to customise).
    * - **405 Method Not Allowed** — a layer's path matched but no layer
    *   accepted the HTTP method.  The `Allow` header lists all registered methods.
    * - **500** (or custom `onError` handler) — a middleware threw or rejected,
@@ -696,17 +698,10 @@ function createRouter(
         return;
       }
 
-      // Genuine 404 — delegate to parent router, not-found handler, or default.
+      // Genuine 404 — delegate to the parent router, or send the default 404.
+      // To customise, register a catch-all layer last (e.g. `app.all('/**', …)`);
+      // it matches in registration order after every real route.
       if (done) return done();
-
-      if (notFoundHandler) {
-        try {
-          notFoundHandler(req, res, () => { /* no-op: not-found handler owns response */ });
-        } catch (e) {
-          invokeErrorHandler(e);
-        }
-        return;
-      }
 
       res.status(404).end(`Cannot ${method} ${url}`);
     };
@@ -802,11 +797,6 @@ function createRouter(
     // ── error ────────────────────────────────────────────────────────────────
     error(handler: ErrorMiddleware): void {
       errorHandlers.push(handler);
-    },
-
-    // ── setNotFound ──────────────────────────────────────────────────────────
-    setNotFound(handler: Middleware): void {
-      notFoundHandler = handler;
     },
 
     // ── routes ───────────────────────────────────────────────────────────────

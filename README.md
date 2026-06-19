@@ -207,9 +207,13 @@ app.error((err, _req, res) =>               // …so the failure bubbles up to h
 
 > Caveat: only the returned promise is tracked. A middleware that calls `next()` and *then* throws later from a detached callback (`setTimeout`, an event emitter) is outside the framework's reach.
 
+For a custom 404, register a catch-all as the **last** layer. Layers match in registration order, so it only runs when no earlier route claimed the request (`/**` matches any path, and `all()` matches any method):
+
 ```ts
-app.setNotFound((_req, res) => res.status(404).json({ error: 'Not Found' }));
+app.all('/**', (_req, res) => res.status(404).json({ error: 'Not Found' }));
 ```
+
+Without one, unmatched requests fall back to the built-in `Cannot METHOD /path` 404.
 
 ### Server
 

@@ -765,25 +765,6 @@ export interface Router {
   error(handler: ErrorMiddleware): void;
 
   /**
-   * Register a custom handler for requests that match no registered route.
-   *
-   * When no route matches and no `done()` callback was supplied to the
-   * listener, this handler is invoked instead of the built-in
-   * `Cannot METHOD /path` 404 response.
-   *
-   * Registering a not-found handler is an explicit, documented alternative to
-   * the `app.all('*', handler)` workaround — without the subtle path-stripping
-   * interactions that glob `use()` layers introduce.
-   *
-   * @example
-   * ```ts
-   * app.setNotFound((_req, res) =>
-   *   res.status(404).json({ error: 'Not Found' }));
-   * ```
-   */
-  setNotFound(handler: Middleware): void;
-
-  /**
    * Return a read-only snapshot of all routes registered on this router.
    *
    * Useful for tooling, documentation generation, and debugging.  The array

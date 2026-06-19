@@ -350,7 +350,7 @@ const service: ServiceDefinition = {
 | Ordered, forwardable error handlers | `app.error((err, req, res, next) => …)` |
 | Single terminal fallback | `app.onError((err, req, res) => …)` |
 | Raise an error from a middleware | `next(err)` (non-null argument) |
-| Custom 404 (no route matched) | `app.setNotFound((req, res) => …)` |
+| Custom 404 (no route matched) | catch-all last: `app.all('/**', (req, res) => …)` |
 | API error → HTTP response | `throw { status, message }` / `throw { status, data }` |
 | Inspect / reshape / escalate API errors | `service.onError(err, ctx, req)` |
 

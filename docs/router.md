@@ -220,9 +220,13 @@ app.onError((err, _req, res) => {
 
 ### Custom 404 handler
 
+Register a catch-all as the **last** layer. Layers match in registration order, so it runs only when no earlier route handled the request. `/**` matches any path and `all()` matches any method:
+
 ```ts
-app.setNotFound((_req, res) => res.status(404).json({ error: 'Not Found' }));
+app.all('/**', (_req, res) => res.status(404).json({ error: 'Not Found' }));
 ```
+
+With no catch-all, unmatched requests fall back to the built-in `Cannot METHOD /path` 404.
 
 ### Passing errors through middleware
 

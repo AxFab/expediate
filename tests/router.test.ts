@@ -2303,54 +2303,44 @@ describe('error bubbling to parent router', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Suite 17 — router.setNotFound()
+// Suite 17 — custom 404 via a catch-all layer
 // ---------------------------------------------------------------------------
 
-describe('router.setNotFound()', () => {
-  it('setNotFound handler fires instead of default 404 when no route matches', async () => {
+describe('custom 404 via catch-all layer', () => {
+  it('a trailing catch-all fires instead of the default 404 when no route matches', async () => {
     const router = createRouter();
-    router.setNotFound((_req, res) => res.status(404).send('custom 404'));
     router.get('/exists', (_req, res) => res.send('ok'));
+    // Registered last → only runs when nothing earlier claimed the request.
+    router.all('/**', (_req, res) => res.status(404).send('custom 404'));
 
     const r = await makeRequestNoDone(router, { url: '/missing' });
     assert.equal(r.statusCode, 404);
     assert.equal(r.body, 'custom 404');
   });
 
-  it('setNotFound handler is NOT called when a route matches', async () => {
+  it('the catch-all is NOT reached when a real route matches', async () => {
     const router = createRouter();
-    let notFoundCalled = false;
-    router.setNotFound((_req, res) => { notFoundCalled = true; res.status(404).send('nf'); });
+    let catchAllCalled = false;
     router.get('/exists', (_req, res) => res.send('found'));
+    router.all('/**', (_req, res) => { catchAllCalled = true; res.status(404).send('nf'); });
 
     const r = await makeRequestNoDone(router, { url: '/exists' });
     assert.equal(r.statusCode, 200);
-    assert.ok(!notFoundCalled, 'setNotFound must not be called when a route matches');
+    assert.ok(!catchAllCalled, 'catch-all must not run when a route matches');
   });
 
-  it('done() callback takes precedence over setNotFound (sub-router behaviour)', async () => {
-    // When the router is used as a sub-router (has a done()), the done() is
-    // called on no-match rather than setNotFound — the parent is responsible.
-    const child = createRouter();
-    let childNotFound = false;
-    child.setNotFound((_req, res) => { childNotFound = true; res.status(404).send('child nf'); });
-
-    const parent = createRouter();
-    let doneCalled = false;
-    parent.use('/', (req, res, next) => {
-      (child.listener as any)(req, res, () => { doneCalled = true; next(); });
-    });
-    parent.get('/fallback', (_req, res) => res.send('parent fallback'));
-
-    const r = await makeRequest(parent, { url: '/fallback' });
-    assert.ok(doneCalled, 'done() should be called when child has no match');
-    assert.ok(!childNotFound, 'child setNotFound must not fire when done() is available');
-    assert.equal(r.body, 'parent fallback');
-  });
-
-  it('setNotFound handler can send JSON', async () => {
+  it('falls back to the built-in 404 when no catch-all is registered', async () => {
     const router = createRouter();
-    router.setNotFound((_req, res) => res.status(404).json({ error: 'not found' }));
+    router.get('/exists', (_req, res) => res.send('ok'));
+
+    const r = await makeRequestNoDone(router, { url: '/missing' });
+    assert.equal(r.statusCode, 404);
+    assert.equal(r.body, 'Cannot GET /missing');
+  });
+
+  it('a catch-all can send JSON', async () => {
+    const router = createRouter();
+    router.all('/**', (_req, res) => res.status(404).json({ error: 'not found' }));
 
     const r = await makeRequestNoDone(router, { url: '/ghost' });
     assert.equal(r.statusCode, 404);
