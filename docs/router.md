@@ -58,6 +58,24 @@ app.use('/api',   apiRouter);             // Router instance
 app.use('/api',   apiRouter.listener);    // equivalent
 ```
 
+### Fluent route builder
+
+`router.route(path)` returns a chainable `RouteBuilder` for registering several HTTP methods against the same path without repeating it:
+
+```ts
+app.route('/users/:id')
+  .get(getUser)
+  .put(updateUser)
+  .delete(deleteUser);
+
+// equivalent to:
+app.get('/users/:id',    getUser);
+app.put('/users/:id',    updateUser);
+app.delete('/users/:id', deleteUser);
+```
+
+`path` may be a string or `RegExp`. The builder exposes `.all/.get/.put/.post/.delete/.patch/.head/.options`, each registering on the underlying router and returning the same builder for further chaining.
+
 ---
 
 ## Path patterns

@@ -41,14 +41,12 @@ These are out of scope for this fuzz suite and tracked elsewhere or accepted:
 - **RS*/ES* JWT key handling.** Only HS256 is fuzzed for confusion/tampering.
   The asymmetric paths have unit coverage in `tests/jwt-auth.test.ts`.
 
-## Open findings
+## Resolved findings
 
-- **F-1 (low) — null byte in static path yields 500, not 404.** A request path
-  containing `%00` (e.g. `/foo/%00/bar`) decodes to a string with a NUL byte
-  that `serveStatic` passes to `fs.stat`, which throws
-  `ERR_INVALID_ARG_VALUE`. The router's error handling catches it and returns
-  500. No traversal or disclosure occurs (the `FS-1` invariant holds), but the
-  static handler should reject NUL-containing paths early and fall through to a
-  clean 404. Surfaced by `tests/static-traversal.fuzz.test.ts` (the `%00` token).
-  Suggested fix: in `static.ts`, reject paths containing `\0` before the
-  `fs.stat` call.
+- **F-1 (low, resolved) — null byte in static path yielded 500, not 404.** A
+  request path containing `%00` (e.g. `/foo/%00/bar`) used to decode to a
+  string with a NUL byte that `serveStatic` passed to `fs.stat`, which threw
+  `ERR_INVALID_ARG_VALUE` and surfaced as a 500. `static.ts` now rejects any
+  path containing a control character (code point < 32, including NUL) before
+  the `fs.stat` call, returning 404 (or falling through if `fallthrough` is
+  set). Covered by `tests/static-traversal.fuzz.test.ts` (the `%00` token).

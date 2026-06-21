@@ -285,6 +285,7 @@ app.post('/upload', async (req, res) => {
 | `limit` | `'100kb'` | Maximum body size |
 | `inflate` | `true` | Accept gzip/deflate/br encoded bodies |
 | `reviver` | `null` | JSON.parse reviver |
+| `strict` | `true` | `json()` only — reject a bare top-level JSON primitive (string, number, boolean, `null`) with `400 Bad Request` |
 | `type` | per parser | Content-type matcher: string, string[], or `(req) => boolean` (supports `*` wildcards) |
 | `verify` | `null` | Hook `(req, res, buf, encoding)` run on the raw body before parsing; throw to reject |
 
@@ -537,12 +538,15 @@ Full declarations are included. Key exports:
 // Router
 import type {
   Router, RouterOptions, RouterRequest, RouterResponse,
-  Middleware, MiddlewareArg, NextFunction, ErrorHandler,
-  Layer, RouteInfo, CookieOptions, TlsOptions, StringMap,
+  Middleware, MiddlewareArg, NextFunction, ErrorHandler, ErrorMiddleware,
+  Layer, RouteInfo, RouteBuilder, CookieOptions, TlsOptions, StringMap,
 } from 'expediate';
 
 // Body parsing
-import type { BodyOptions, FormPart, FormPartStream, LoggerOptions } from 'expediate';
+import type {
+  BodyOptions, BodyTypeMatcher, VerifyFn, FormPart, FormPartStream,
+  LoggerOptions, CorsOptions,
+} from 'expediate';
 
 // Static files
 import type { StaticOptions, Mime } from 'expediate';

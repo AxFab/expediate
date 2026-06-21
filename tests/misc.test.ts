@@ -13,7 +13,7 @@ import net    from 'node:net';
 import { describe, it } from 'node:test';
 
 import createRouter from '../src/router.ts';
-import { json, formData, formEncoded, raw, text, parseBody, logger, streamFormData } from '../src/misc.js';
+import { json, formData, formEncoded, raw, text, parseBody, logger, streamFormData, cors } from '../src/misc.js';
 
 // ---------------------------------------------------------------------------
 // HTTP test helper
@@ -1502,5 +1502,107 @@ describe('verify hook', () => {
       headers: { 'content-type': 'application/json' },
     });
     assert.equal(r.statusCode, 403);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite — cors() middleware
+// ---------------------------------------------------------------------------
+
+describe('cors() middleware', () => {
+  it('defaults to a wildcard origin', async () => {
+    const r = await request(cors(), {
+      method:  'GET',
+      headers: { origin: 'https://example.com' },
+    });
+    assert.equal(r.headers['access-control-allow-origin'], '*');
+  });
+
+  it('omits Access-Control-Allow-Origin when the request has no Origin header', async () => {
+    const r = await request(cors(), { method: 'GET' });
+    assert.equal(r.headers['access-control-allow-origin'], undefined);
+  });
+
+  it('echoes a single configured string origin as-is', async () => {
+    const r = await request(cors({ origin: 'https://app.example.com' }), {
+      method:  'GET',
+      headers: { origin: 'https://app.example.com' },
+    });
+    assert.equal(r.headers['access-control-allow-origin'], 'https://app.example.com');
+  });
+
+  it('echoes back only the matching origin from an allow-list array', async () => {
+    const r = await request(
+      cors({ origin: ['https://a.example.com', 'https://b.example.com'] }),
+      { method: 'GET', headers: { origin: 'https://b.example.com' } },
+    );
+    // A single exact value, not a comma-joined string — Node's http client
+    // joins duplicate response header lines with ', ', which is what the
+    // array-origin bug used to produce (one Access-Control-Allow-Origin line
+    // per array element). An exact match here proves only one line was sent.
+    assert.equal(r.headers['access-control-allow-origin'], 'https://b.example.com');
+  });
+
+  it('omits the header when the request origin is not in the allow-list array', async () => {
+    const r = await request(
+      cors({ origin: ['https://a.example.com', 'https://b.example.com'] }),
+      { method: 'GET', headers: { origin: 'https://evil.example.com' } },
+    );
+    assert.equal(r.headers['access-control-allow-origin'], undefined);
+  });
+
+  it('sets Vary when configured and the array origin matches', async () => {
+    const r = await request(
+      cors({ origin: ['https://a.example.com'], vary: 'Origin' }),
+      { method: 'GET', headers: { origin: 'https://a.example.com' } },
+    );
+    assert.equal(r.headers['access-control-allow-origin'], 'https://a.example.com');
+    assert.equal(r.headers.vary, 'Origin');
+  });
+
+  it('does not set Vary when the array origin has no match', async () => {
+    const r = await request(
+      cors({ origin: ['https://a.example.com'], vary: 'Origin' }),
+      { method: 'GET', headers: { origin: 'https://evil.example.com' } },
+    );
+    assert.equal(r.headers.vary, undefined);
+  });
+
+  it('answers an OPTIONS preflight with the matched array origin', async () => {
+    const r = await request(
+      cors({ origin: ['https://a.example.com', 'https://b.example.com'] }),
+      { method: 'OPTIONS', headers: { origin: 'https://b.example.com' } },
+    );
+    assert.equal(r.statusCode, 204);
+    assert.equal(r.headers['access-control-allow-origin'], 'https://b.example.com');
+    assert.ok(r.headers['access-control-allow-methods']);
+    assert.ok(r.headers['access-control-allow-headers']);
+  });
+
+  it('calls next() for non-OPTIONS requests', async () => {
+    const r = await request(cors(), {
+      method:  'GET',
+      headers: { origin: 'https://x.example.com' },
+    });
+    assert.equal(r.body, 'next() called');
+  });
+
+  it('sets Allow-Credentials and Max-Age on preflight when configured', async () => {
+    const r = await request(
+      cors({ allowCredentials: true, maxAge: 600 }),
+      { method: 'OPTIONS', headers: { origin: 'https://x.example.com' } },
+    );
+    assert.equal(r.headers['access-control-allow-credentials'], 'true');
+    assert.equal(r.headers['access-control-max-age'], '600');
+  });
+
+  it('gates requests via the preflight callback: 403 for OPTIONS, 400 otherwise', async () => {
+    const gated = cors({ preflight: () => false });
+
+    const optRes = await request(gated, { method: 'OPTIONS' });
+    assert.equal(optRes.statusCode, 403);
+
+    const getRes = await request(gated, { method: 'GET' });
+    assert.equal(getRes.statusCode, 400);
   });
 });

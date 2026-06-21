@@ -202,7 +202,7 @@ app.use(cors({
 }));
 ```
 
-When `origin` is an array, the middleware compares the request `Origin` against the list and echoes the matching origin (or omits the header if no match). `Vary: Origin` is added automatically when origin matching is dynamic.
+When `origin` is an array, the middleware compares the request `Origin` against the list and echoes back only the matching origin (or omits the header entirely if no match) — a plain array can't be passed straight to `Access-Control-Allow-Origin` since the CORS spec only allows a single value. `Vary` is **not** added automatically; if a cache sits in front of an array-origin response, set `vary: 'Origin'` yourself so the cache keys on it.
 
 | Option | Type | Default | Description |
 |---|---|---|---|

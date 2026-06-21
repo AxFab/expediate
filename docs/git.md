@@ -89,7 +89,7 @@ Client disconnections during streaming (`EPIPE` on stdin) are silently ignored.
 
 ## `gitCreate(gitDirectory, options?)`
 
-Programmatically initialise a new bare Git repository:
+Programmatically initialise a new Git repository:
 
 ```ts
 import { gitCreate } from 'expediate';
@@ -99,12 +99,13 @@ await gitCreate('/srv/git/myproject.git', {
 });
 ```
 
-Runs `git init --bare` and optionally writes a `description` file.
+Runs `git init` (`--bare` by default) and optionally writes a `description` file.
 
-| Option | Type | Description |
-|---|---|---|
-| `description` | `string` | Contents of the repository's `description` file |
-| `gitPath` | `string` | Same as `gitHandler` — directory prefix for the `git` binary |
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `description` | `string` | — | Contents of the repository's `description` file |
+| `gitPath` | `string` | — | Same as `gitHandler` — directory prefix for the `git` binary |
+| `bare` | `boolean` | `true` | Initialise as a bare repository (no working tree). Pass `false` for a normal repository with a checked-out working tree. |
 
 ---
 

@@ -98,10 +98,10 @@ export interface BodyOptions {
   reviver?: Reviver | null;
   /**
    * When `true` (default), JSON parsing is restricted to objects and arrays.
-   * Bare primitives (strings, numbers, booleans) at the top level are
-   * rejected.  Has no effect on non-JSON bodies.
+   * Bare primitives (strings, numbers, booleans, or `null`) at the top level
+   * are rejected with `400 Bad Request`. Has no effect on non-JSON bodies.
    *
-   * @remarks Currently reserved for future enforcement; not yet applied.
+   * @remarks Enforced in `readBodyAsJson` (tagged `FIX-10`).
    */
   strict?: boolean;
   /**
@@ -1178,7 +1178,25 @@ export function logger(opts?: Partial<LoggerOptions>): Middleware {
 // Cors middleware
 // ---------------------------------------------------------------------------
 
+/**
+ * Configuration for the {@link cors} middleware factory.
+ */
 export interface CorsOptions {
+  /**
+   * Value(s) allowed for `Access-Control-Allow-Origin`.
+   *
+   * - A single `string` (including `'*'`) is sent as-is — there's only one
+   *   possible value, so no per-request matching is needed.
+   * - A `string[]` is treated as an allow-list: the request's `Origin` header
+   *   is compared against each entry, and only the matching entry is echoed
+   *   back as the (single) header value. `res.setHeader()` does not join
+   *   array values for this header — sending the array directly would make
+   *   Node emit one `Access-Control-Allow-Origin` line per element, which
+   *   violates the CORS spec (only one value is permitted there) and causes
+   *   browsers to reject the response outright.
+   * - When the request's `Origin` is not in the array, no match is sent and
+   *   `Access-Control-Allow-Origin` is omitted, so the browser denies access.
+   */
   origin: string | string[],
   allowHeaders: string | string[],
   allowMethods: string | string[],
@@ -1189,6 +1207,46 @@ export interface CorsOptions {
   preflight: ((req: RouterRequest) => boolean) | undefined
 }
 
+/**
+ * Resolve the single `Access-Control-Allow-Origin` value for a request, given
+ * the configured {@link CorsOptions.origin} and the request's `Origin` header.
+ *
+ * @param origin        - The configured allow-list (string or array form).
+ * @param requestOrigin - The request's `Origin` header value.
+ * @returns The string to send as `Access-Control-Allow-Origin`, or `undefined`
+ *          when `origin` is an array with no matching entry (the header
+ *          should then be omitted entirely).
+ */
+function resolveAllowOrigin(
+  origin: string | string[],
+  requestOrigin: string,
+): string | undefined {
+  if (typeof origin === 'string') return origin;
+  return origin.includes(requestOrigin) ? requestOrigin : undefined;
+}
+
+/**
+ * Middleware factory that adds Cross-Origin Resource Sharing (CORS) response
+ * headers and answers `OPTIONS` preflight requests.
+ *
+ * CORS headers are only set when the request carries an `Origin` header
+ * (browser-only; server-to-server requests typically omit it). When
+ * {@link CorsOptions.origin} is an array, the request's `Origin` is matched
+ * against it via {@link resolveAllowOrigin} and only the matching value is
+ * echoed back — see that option's documentation for why a plain array cannot
+ * be passed straight to `res.setHeader()`.
+ *
+ * @param opts - Optional configuration (see {@link CorsOptions}). All fields
+ *               are optional; unset fields fall back to permissive defaults
+ *               (wildcard origin, no credentials, no max-age).
+ * @returns An Express-compatible middleware function.
+ *
+ * @example
+ * ```ts
+ * // Allow exactly two known origins, denying everything else
+ * app.use(cors({ origin: ['https://app.example.com', 'https://admin.example.com'] }));
+ * ```
+ */
 export function cors(opts?: Partial<CorsOptions>): Middleware {
   const options:CorsOptions = {
     origin: opts?.origin ?? '*',
@@ -1208,9 +1266,12 @@ export function cors(opts?: Partial<CorsOptions>): Middleware {
       return
     }
     if (req.headers.origin) {
-      res.setHeader('Access-Control-Allow-Origin', options.origin);
-      if (options.vary !== undefined)
-        res.setHeader('Vary', options.vary)
+      const allowOrigin = resolveAllowOrigin(options.origin, req.headers.origin);
+      if (allowOrigin !== undefined) {
+        res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+        if (options.vary !== undefined)
+          res.setHeader('Vary', options.vary)
+      }
     }
     if (req.method == 'OPTIONS') {
       res.setHeader('Access-Control-Allow-Headers', options.allowHeaders)

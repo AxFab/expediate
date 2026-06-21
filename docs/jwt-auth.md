@@ -9,11 +9,12 @@ Features: HMAC / RSA / ECDSA algorithms, refresh token rotation, role and permis
 ## Quick start
 
 ```ts
-import { createRouter, json, createJwtPlugin } from 'expediate';
+import { createRouter, json, createJwtPlugin, createMapTokenStore } from 'expediate';
 
 const app  = createRouter();
 const auth = createJwtPlugin({
   accessTokenSecret: process.env.JWT_SECRET!,
+  refreshTokenStore: createMapTokenStore(), // omit to disable refresh tokens entirely
 });
 
 // Auth endpoints (all require the json() body parser)
@@ -27,6 +28,10 @@ app.get('/me', auth.authenticate, auth.authorize, (req, res) => {
 });
 ```
 
+Refresh tokens are opt-in: `auth.login` only includes a `refreshToken` in its
+response when `refreshTokenStore` is configured, and `auth.refresh` responds
+`501 Not Implemented` otherwise.
+
 ---
 
 ## Auth endpoints
@@ -37,10 +42,10 @@ app.get('/me', auth.authenticate, auth.authorize, (req, res) => {
 // Request
 { "username": "alice", "password": "password123" }
 
-// Response 200
+// Response 200 (refreshToken present only when refreshTokenStore is configured)
 {
   "accessToken":  "eyJ...",
-  "refreshToken": "a3f8...",
+  "refreshToken": "eyJ...",
   "expiresIn":    900,
   "tokenType":    "Bearer"
 }
@@ -50,13 +55,13 @@ app.get('/me', auth.authenticate, auth.authorize, (req, res) => {
 
 ```json
 // Request
-{ "username": "alice", "refreshToken": "a3f8..." }
+{ "refreshToken": "eyJ..." }
 
 // Response 200 — new token pair (old refresh token is invalidated immediately)
-{ "accessToken": "eyJ...", "refreshToken": "b9c2...", "expiresIn": 900, "tokenType": "Bearer" }
+{ "accessToken": "eyJ...", "refreshToken": "eyJ...", "expiresIn": 900, "tokenType": "Bearer" }
 ```
 
-Refresh tokens are **rotated** on every use — the old token is invalidated before the new pair is issued, so a stolen refresh token can only be used once.
+Refresh tokens are **rotated** on every use — the old token is invalidated before the new pair is issued, so a stolen refresh token can only be used once. Responds `501 Not Implemented` if no `refreshTokenStore` was configured.
 
 ### `POST /auth/logout`
 
@@ -116,11 +121,16 @@ app.put('/posts/:id', ...auth.requirePermission('write', 'publish'), updatePost)
 ```ts
 const auth = createJwtPlugin({
   // ── Secrets (always set in production) ──────────────────────────────────
-  accessTokenSecret:  'change-me',  // shared HMAC secret (HS*)
+  accessTokenSecret:  'change-me',      // shared HMAC secret (HS*)
+  refreshTokenSecret: 'change-me-too',  // shared HMAC secret for refresh JWTs (HS*)
 
   // For asymmetric algorithms (RS*, ES*), supply PEM keys instead:
   // accessTokenPrivateKey: readFileSync('private.pem', 'utf8'),
   // accessTokenPublicKey:  readFileSync('public.pem',  'utf8'),
+  // Optional separate key pair for refresh tokens — falls back to the
+  // access token keys above when omitted:
+  // refreshTokenPrivateKey: readFileSync('refresh-private.pem', 'utf8'),
+  // refreshTokenPublicKey:  readFileSync('refresh-public.pem',  'utf8'),
 
   // ── Algorithm ───────────────────────────────────────────────────────────
   alg: 'HS256',  // 'HS256' | 'HS384' | 'HS512'
@@ -133,13 +143,16 @@ const auth = createJwtPlugin({
 
   // ── Claims ──────────────────────────────────────────────────────────────
   issuer:      'my-app',
-  checkIssuer: true,  // reject tokens with a different iss claim
+  checkIssuer: true,  // reject tokens with a different iss claim (default: false)
 
   // ── User database ───────────────────────────────────────────────────────
   // Replace with a real database query; return null to reject login
   fetchUser: async (username) => {
     return await db.users.findOne({ username });
   },
+
+  // Extracts the subject identifier from a user record (default: user => user.username)
+  username: (user) => user.id,
 
   // ── Password validation ─────────────────────────────────────────────────
   // Default uses SHA-256 — replace with bcrypt/argon2 for production
@@ -156,7 +169,10 @@ const auth = createJwtPlugin({
   }),
 
   // ── Token store ─────────────────────────────────────────────────────────
-  // Default is an in-memory Map. Replace with a Redis adapter for multi-instance.
+  // Required to enable refresh tokens at all — omit to disable them entirely
+  // (auth.login then omits refreshToken, auth.refresh responds 501).
+  // createMapTokenStore() is a simple in-memory default; replace with a
+  // Redis adapter for multi-instance deployments.
   refreshTokenStore: redisAdapter,
 });
 ```
@@ -165,16 +181,22 @@ const auth = createJwtPlugin({
 
 ## Token store interface
 
+The store is keyed by JWT ID (`jti`), not by the token string itself — every
+issued refresh token carries a unique `jti` claim, and the store maps that ID
+to a record. Methods may return their result directly or as a `Promise`:
+
 ```ts
 interface TokenStore {
-  get(token: string):                      Promise<RefreshTokenRecord | undefined>;
-  set(token: string, record: RefreshTokenRecord): Promise<void>;
-  delete(token: string):                   Promise<void>;
+  set(jti: string, record: RefreshTokenRecord): void | Promise<void>;
+  get(jti: string): RefreshTokenRecord | undefined | Promise<RefreshTokenRecord | undefined>;
+  delete(jti: string): void | Promise<void>;
+  deleteBySubject?(sub: string): void | Promise<void>;  // optional — "log out all sessions"
 }
 
 interface RefreshTokenRecord {
-  username:  string;
-  expiresAt: number;  // Unix seconds
+  sub:       string;  // subject the token was issued to
+  issuedAt:  number;  // Unix ms timestamp
+  expiresAt: number;  // Unix ms timestamp
 }
 ```
 
@@ -188,6 +210,22 @@ const auth = createJwtPlugin({
   refreshTokenStore: createMapTokenStore(),
 });
 ```
+
+### Refresh token internals
+
+Refresh tokens are signed JWTs, not opaque strings. Their payload carries:
+
+```json
+{ "sub": "alice", "jti": "uuid-v4", "type": "refresh", "iss": "my-app", "iat": 0, "exp": 0 }
+```
+
+The `jti` (a `crypto.randomUUID()` value) is the token store key. Refresh
+tokens are signed with `refreshTokenSecret` (HS*) or `refreshTokenPrivateKey`
+/ `refreshTokenPublicKey` (RS*/ES*, falling back to the access-token PEM keys
+when omitted) — a distinct key from the access token where configured, so an
+access token can never be replayed as a refresh token. On every
+`POST /auth/refresh`, the old `jti` is looked up, deleted, then a fresh pair
+is issued (rotation).
 
 ---
 
@@ -209,4 +247,5 @@ Verification uses `crypto.timingSafeEqual` to prevent timing attacks.
 
 - The default password hashing uses SHA-256, which is **not suitable for production**. Always supply an `isPasswordValid` function that uses bcrypt, argon2, or scrypt.
 - Calling `createJwtPlugin()` with no `accessTokenSecret` uses a placeholder secret and should only be done in tests or demos.
-- Refresh tokens are opaque 128-character hex strings (64 random bytes), not JWTs. They are stored server-side in the token store and invalidated on each use.
+- Refresh tokens are signed JWTs carrying a `jti` claim, not opaque strings — see [Refresh token internals](#refresh-token-internals). Only the `jti` is stored server-side (in the token store), and it's invalidated on each use.
+- Refresh tokens are entirely opt-in: omit `refreshTokenStore` to disable them — `auth.login` then omits `refreshToken` from its response and `auth.refresh` responds `501 Not Implemented`.

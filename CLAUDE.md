@@ -78,7 +78,7 @@ Express-compatible API surface. It wraps Node.js built-in `http`/`https` modules
 only. There are no runtime npm dependencies whatsoever.
 
 - **Package type:** ESM-first (`"type": "module"`) with a CJS compatibility shim
-- **Version:** 1.0.4
+- **Version:** 1.0.5
 - **Build:** `npm run build:esm` (`tsc`) + `npm run build:cjs` (`node scripts/build-cjs.cjs`, CJS bundle via esbuild) → outputs to `./dist/`. `npm run build` runs both.
 - **Test runner:** `node --import tsx --test 'tests/*.test.ts'`
 - **TypeScript version:** 5.9.3 (strict mode, isolatedModules, esModuleInterop)
@@ -96,20 +96,19 @@ Test files in `tests/` use `tsx` at runtime and are never compiled.
 
 | Source file       | Exports (from `src/index.ts`)                                              |
 |-------------------|----------------------------------------------------------------------------|
-| `router.ts`       | `createRouter`, types: `Router`, `RouterOptions`, `RouterRequest`, `RouterResponse`, `Middleware`, `MiddlewareArg`, `NextFunction`, `ErrorHandler`, `ErrorMiddleware`, `Layer`, `RouteInfo`, `CookieOptions`, `TlsOptions`, `StringMap` |
+| `router.ts`       | `createRouter`, types: `Router`, `RouterOptions`, `RouterRequest`, `RouterResponse`, `Middleware`, `MiddlewareArg`, `NextFunction`, `ErrorHandler`, `ErrorMiddleware`, `Layer`, `RouteInfo`, `RouteBuilder`, `CookieOptions`, `TlsOptions`, `StringMap` |
 | `static.ts`       | `serveStatic`, `serveFile`, `sendFile`, `mime`, types: `StaticOptions`, `Mime` |
-| `misc.ts`         | `json`, `formData`, `formEncoded`, `parseBody`, `streamFormData`, `logger`, `cors`, `parseMultipartBody`, types: `BodyOptions`, `LoggerOptions`, `FormPart`, `FormPartStream` |
+| `misc.ts`         | `json`, `formData`, `formEncoded`, `raw`, `text`, `parseBody`, `streamFormData`, `logger`, `cors`, `parseMultipartBody`, types: `BodyOptions`, `BodyTypeMatcher`, `VerifyFn`, `LoggerOptions`, `FormPart`, `FormPartStream`, `CorsOptions` |
 | `middleware.ts`   | `compress`, `requestId`, `rateLimit`, `cacheControl`, `csrf`, `securityHeaders`, `conditionalGet`, types: `CompressOptions`, `RequestIdOptions`, `RateLimitOptions`, `CacheControlOptions`, `CsrfOptions`, `SecurityHeadersOptions` |
 | `jwt-auth.ts`     | `createJwtPlugin`, `createMapTokenStore`, types: `JwtPlugin`, `JwtConfig`, `TokenStore`, `RefreshTokenRecord` |
 | `git.ts`          | `gitHandler`, `gitCreate`, types: `GitHandlerOptions`                      |
 | `apis.ts`         | `apiBuilder`, `defineController`, types: `ApiError`, `ApiContext`, `ServiceMethod`, `ServiceInstance`, `ServiceMethods`, `RouteMap`, `ServiceDefinition`, `ControllerDefinition`, `Guard`, `AuthBinding`, `ApiBuilderOptions`, `ApiRouter`, `ApiRouterExtensions` |
-| `openapi.ts`      | `describe`, `openApiSpec`, `serializeSpec`, `DESCRIBE_META`, types: `JsonSchema`, `ParameterObject`, `RequestBodyObject`, `ResponseObject`, `OperationMeta`, `OpenApiServiceMeta`, `SpecOptions`, `SpecFormat`, `OpenApiDocument` |
+| `openapi.ts`      | `describe`, `openApiSpec`, `serializeSpec`, `DESCRIBE_META`, types: `JsonSchema`, `ParameterObject`, `RequestBodyObject`, `ResponseObject`, `OperationMeta`, `OpenApiServiceMeta`, `RouteOpenApi`, `ControllerOpenApi`, `ServiceOpenApi`, `OpenApiSource`, `SpecOptions`, `SpecFormat`, `OpenApiDocument` |
 
-Note: `cors` is exported from `misc` but **not documented in the README**. `extractCharset`
-and `readReqBody` are exported from `misc.ts` directly but not re-exported through `index.ts` —
-they are implementation details also used by `router.ts`. Similarly, `collectRoutes` and
-`validateSchema` are exported from `apis.ts` (consumed by `openapi.ts` and the test suite
-respectively) but are not part of the public package API.
+Note: `extractCharset` and `readReqBody` are exported from `misc.ts` directly but not
+re-exported through `index.ts` — they are implementation details also used by `router.ts`.
+Similarly, `collectRoutes` and `validateSchema` are exported from `apis.ts` (consumed by
+`openapi.ts` and the test suite respectively) but are not part of the public package API.
 
 ---
 
@@ -256,12 +255,15 @@ interface BodyOptions {
   inflate?: boolean;      // default: true  — accept gzip/deflate
   limit?:   string|number; // default: '100kb'
   reviver?: Reviver|null; // default: null  — JSON.parse reviver
-  strict?:  boolean;      // default: true  — reserved, NOT YET ENFORCED
+  strict?:  boolean;      // default: true  — enforced (see below)
 }
 ```
 
-`strict` is documented as restricting JSON to top-level objects/arrays, but
-the enforcement is not implemented yet (see TODO comment in code).
+`strict` restricts JSON parsing to top-level objects/arrays: when `true`
+(the default), a bare top-level primitive (string, number, boolean, or
+`null`) is rejected with `400 Bad Request: JSON body must be an object or
+array` (`readBodyAsJson` in `misc.ts`, tagged `FIX-10`). Covered by the
+`'json() strict mode (FIX-10)'` suite in `tests/misc.test.ts`.
 
 ### Size parsing (`readSize`)
 
@@ -405,10 +407,19 @@ Fully manual — no external library:
 ### Token types
 
 - **Access token**: standard JWT (header.payload.signature), short-lived (default 15 min)
-- **Refresh token**: opaque 128-char hex string (64 random bytes), long-lived (default 7 days), stored server-side in a `Map`
+- **Refresh token**: also a signed JWT, long-lived (default 7 days), carrying a `jti`
+  (`crypto.randomUUID()`) claim and `type: 'refresh'`. The `TokenStore` keys records by
+  `jti`, not by the token string itself.
 
-`refreshTokenSecret` in `JwtConfig` is **reserved but currently unused**. The
-refresh token is opaque, not a JWT.
+Refresh support is **entirely opt-in** — `refreshTokenStore` is `undefined` in
+`DEFAULT_CONFIG`. When no store is configured, `auth.login`'s response omits the
+`refreshToken` field, and `POST /auth/refresh` responds `501 Not Implemented`. Pass
+`createMapTokenStore()` (or a custom `TokenStore`) to enable it.
+
+`refreshTokenSecret` / `refreshTokenPrivateKey` / `refreshTokenPublicKey` sign the
+refresh JWT; for RS*/ES* algorithms they fall back to the access-token PEM keys when
+absent. `checkIssuer` defaults to `false`. A `username` extractor function (default:
+`(user) => user.username`) controls how the subject claim is derived from `UserRecord`.
 
 ### Token rotation
 
@@ -787,6 +798,10 @@ containing `'LOST'`.
 | `jwt-auth.test.ts`    | hashPassword, signToken/verifyToken (HS*, RS*, ES*), login, refresh (rotation), logout, authenticate, authorize, requireRole, requirePermission, custom config, security edge cases |
 | `git.test.ts`         | factory validation, pktLine, GET /info/refs, POST /git-upload-pack, repository callback, options (strict/timeout/gitPath), unrecognised routes |
 | `openapi.test.ts`     | describe(), openApiSpec(), serializeSpec(), YAML output, path parameters, request/response schemas, merged controller specs, security emission (bearerAuth, x-required-permissions), ServiceDefinition.schemas precedence |
+| `jwt.fuzz.test.ts`    | property-based (fast-check): algorithm confusion (`alg: none`, mismatched alg), signature tampering, wrong-key rejection, expired-token replay, malformed-token robustness (`verifyToken` never throws) |
+| `multipart.fuzz.test.ts` | property-based: `parseMultipartBody` terminates within budget on adversarial bytes/boundaries, always returns `FormPart[]` or throws `{ status: 400 }`, well-formed bodies round-trip correctly |
+| `router-redos.fuzz.test.ts` | property-based: matching any path against plain/param/`\d+`-constrained/glob routes stays roughly linear (no catastrophic backtracking) |
+| `static-traversal.fuzz.test.ts` | property-based: no crafted path (raw `..`, `%2e%2e`, encoded slashes, NUL/control bytes, depth) serves a file above the static root |
 
 ### Method handling: HEAD / OPTIONS / 405
 
@@ -815,33 +830,29 @@ after all layers are exhausted (see the `allowedMethods` set):
 
 ## 11. Known Issues and TODOs
 
-Open items identified from source comments:
-
-1. **`strict` body option** (`misc.ts`): `BodyOptions.strict` is documented to
-   restrict JSON to top-level objects/arrays but the enforcement is marked
-   `@remarks Currently reserved for future enforcement; not yet applied.`
-
-2. **`refreshTokenSecret`** (`jwt-auth.ts`): Field exists in `JwtConfig` but
-   refresh tokens are opaque hex strings, not JWTs. The field is reserved for
-   future use when refresh tokens might be signed JWTs.
-
-3. **`gitCreate` JSDoc** (`git.ts`): The `gitCreate` function has an incomplete
-   JSDoc comment (the `@param` and `@returns` tags are missing).
-
-4. ~~Response validation~~ — **implemented**: `apiBuilder(service, { responses: true })`
-   validates each handler's return against the route's declared `responses['200']`
-   schema (default off). A mismatch is a server-contract breach → `500`. The
-   builder's optional second argument (`ApiBuilderOptions`) also makes request
-   validation default-on (`{ requests: false }` cancels it) and overrides the
-   legacy `service.validate` field when present.
+No open issues are currently tracked here.
 
 **Resolved items (no longer open):**
+
+- ~~Response validation~~ — **implemented**: `apiBuilder(service, { responses: true })`
+  validates each handler's return against the route's declared `responses['200']`
+  schema (default off). A mismatch is a server-contract breach → `500`. The
+  builder's optional second argument (`ApiBuilderOptions`) also makes request
+  validation default-on (`{ requests: false }` cancels it) and overrides the
+  legacy `service.validate` field when present.
 
 - ~~Cookie reading/writing~~ — Signed cookies are fully implemented: HMAC-SHA256 signing/verification via `createRouter({ secret })`. `j:` prefix handled on both read and write.
 - ~~Async error catching~~ — The `invoke()` helper wraps every middleware call; `ret instanceof Promise` catches async rejections and routes them to `invokeErrorHandler`.
 - ~~Directory listing sort~~ — `writeIndexOf()` now supports sortable columns via `?C=N;O=D` query params (directories always first).
 - ~~`async setup()` not awaited~~ — `buildModule()` now awaits the `Promise` returned by `setup()` before the module is considered ready.
 - ~~No ordered error middleware / no error bubbling~~ — `router.error()` registers an ordered, escapable error-middleware chain; unhandled errors fall back to `onError()` then **bubble to the parent router** via `done(err)`. `apiBuilder` adds a `ServiceDefinition.onError` hook. The 4-argument arity hack was deliberately rejected (see §14). Async caveat from §3 still applies.
+- ~~`strict` body option not enforced~~ — `BodyOptions.strict` (default `true`)
+  rejects a bare top-level JSON primitive with `400 Bad Request` (`readBodyAsJson`
+  in `misc.ts`, tagged `FIX-10`). See §4.
+- ~~`cors()` array `origin` doesn't grant access to any listed origin~~ — fixed:
+  `cors()` now matches `req.headers.origin` against the array and echoes back
+  only the matching entry via a `resolveAllowOrigin()` helper, omitting the
+  header on no match. See §9.
 
 ---
 
@@ -863,6 +874,8 @@ mime: Mime  // MIME type lookup object
 json(opts?: BodyOptions): Middleware
 formData(opts?: BodyOptions): Middleware
 formEncoded(opts?: BodyOptions): Middleware
+raw(opts?: BodyOptions): Middleware
+text(opts?: BodyOptions): Middleware
 parseBody(opts?: BodyOptions): Middleware
 streamFormData(req: RouterRequest, opts?: BodyOptions): AsyncGenerator<FormPartStream>
 logger(opts?: Partial<LoggerOptions>): Middleware
@@ -912,14 +925,18 @@ interface RouterResponse // extends http.ServerResponse — adds send(), json(),
 interface Router         // the return type of createRouter()
 interface RouteInfo      // { method, path, stripPath } — returned by router.routes()
 interface Layer          // internal route entry
+interface RouteBuilder    // chainable .all/.get/.put/.post/.delete/.patch/.head/.options, returned by router.route(path)
 interface CookieOptions
 interface TlsOptions
 
 // Body parsing
 interface BodyOptions
+type BodyTypeMatcher       // string | string[] | (req) => boolean — overrides which Content-Type a parser matches
+type VerifyFn               // (req, res, buf, encoding) => void; throw to reject the body
 interface LoggerOptions
 interface FormPart        // multipart part: { headers, content: Buffer }
 type FormPartStream       // { headers, stream: Readable }
+interface CorsOptions
 
 // Middleware
 interface CompressOptions
@@ -953,6 +970,10 @@ type RouteMap<TInstance>
 // OpenAPI
 interface OperationMeta    // + guards?, permission? (v2)
 interface OpenApiServiceMeta<TInstance>
+type RouteOpenApi          // Record<string, OperationMeta>
+interface ControllerOpenApi // prefix?, tags?, permission?, GET?/POST?/PUT?/DELETE?/PATCH? (RouteOpenApi)
+interface ServiceOpenApi   // controllers?, guards?, auth?, validate?, GET?/POST?/... (RouteOpenApi) — spec-only counterpart of ServiceDefinition
+type OpenApiSource         // ServiceDefinition<any> | ServiceOpenApi — accepted by openApiSpec()
 interface SpecOptions      // { title, version, basePath?, schemas?, ... }
 type SpecFormat            // 'json' | 'yaml'
 interface OpenApiDocument  // components may include securitySchemes (v2)

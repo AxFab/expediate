@@ -44,6 +44,7 @@ All notable changes to **expediate** are documented here.
 - Per-request `req`/`res` helpers are now defined once on shared prototypes and attached via `Object.setPrototypeOf` instead of allocating ~20 closures on every request; the `status()` range check was folded into the single prototype method (removing a second per-request allocation)
 
 ### Fixed
+- `cors()` with an array `origin` now matches the request's `Origin` header against the allow-list and echoes back only the matching entry (previously it only ever matched a single string origin, so an array never granted access)
 - Body parsing no longer returns `415` when a parser's content type doesn't match — it passes through to the next middleware, so parser stacks (`json()` + `formEncoded()` + …) compose correctly
 - Static file serving hardened against control characters in the path and corrected path-handling edge cases
 - Consistent method-routing behaviour (`HEAD`/`OPTIONS`/`405`) across registered and unregistered paths
@@ -53,6 +54,7 @@ All notable changes to **expediate** are documented here.
 - Split the ~2,200-line `src/router.ts` into `router.ts` + `router-types.ts` (type declarations) + `http-objects.ts` (req/res augmentation and cookie helpers); the public API and exports are unchanged
 - Added a type-aware ESLint flat config (`eslint.config.js`) and `tsconfig.eslint.json`; `npm run lint` now passes. Reduced `any` usage across `src/`
 - Bumped `esbuild` (build-time dev dependency) to resolve security advisories; pruned stale repo files (`AUDIT.md`, duplicate `docs/middlewares.md`)
+- Documentation overhaul: corrected the JWT refresh-token description (signed JWT keyed by `jti`, opt-in via `refreshTokenStore`, `501` when absent — was documented as an always-on opaque hex token), the Brotli request-decompression support (was documented as unsupported), `static.md`'s conditional-request coverage (`If-Match`/`If-Unmodified-Since` → `412`), and `git.md`'s `gitCreate` `bare` option; documented `router.route()`, `raw()`, and `text()`. Removed `ROADMAP.md`, `AUDIT.md` (disposable, point-in-time planning/audit artifacts), and the `docs/mdlw/` directory (20 one-function-per-file pages that duplicated the topic docs in `docs/`) — `docs/wiki.json` updated to drop the now-removed entries
 
 ---
 

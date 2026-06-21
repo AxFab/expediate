@@ -47,6 +47,8 @@ X-Content-Type-Options: nosniff
 
 `serveStatic` honours `If-None-Match` and `If-Modified-Since` request headers. When the client's cached version is still fresh, a `304 Not Modified` is returned with no body. `Cache-Control: no-cache` forces a full response even when the ETag matches.
 
+`If-Match` and `If-Unmodified-Since` are also honoured: when the condition fails, the response is `412 Precondition Failed` instead of serving the file.
+
 ---
 
 ## `serveFile(filepath, opts?)`

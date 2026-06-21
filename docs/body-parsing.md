@@ -1,6 +1,6 @@
 # Body Parsing
 
-Expediate ships five body-parsing utilities: middleware factories for the most common content types, an auto-detecting catch-all, and a streaming multipart generator.
+Expediate ships seven body-parsing utilities: middleware factories for the most common content types, an auto-detecting catch-all, and a streaming multipart generator.
 
 All body-parsing middleware must be registered **before** route handlers that read `req.body`.
 
@@ -39,7 +39,7 @@ app.post('/data', (req, res) => {
 | `limit` | `string \| number` | `'100kb'` | Max body size. Accepts `'10kb'`, `'2mb'`, `'1gb'`, or bytes |
 | `inflate` | `boolean` | `true` | Accept gzip/deflate encoded bodies |
 | `reviver` | `Reviver \| null` | `null` | Second argument to `JSON.parse` |
-| `strict` | `boolean` | `true` | Reserved for future top-level primitive rejection (not yet enforced) |
+| `strict` | `boolean` | `true` | When `true`, rejects a top-level JSON primitive (bare string, number, boolean, or `null`) with `400 Bad Request`; only objects and arrays are accepted |
 
 **Error responses:**
 
@@ -92,6 +92,40 @@ app.post('/form', formEncoded(), (req, res) => {
   res.json({ username, tags });
 });
 ```
+
+---
+
+## `raw()`
+
+Reads the request body as a `Buffer` without parsing it, and populates `req.body`.
+
+```ts
+import { raw } from 'expediate';
+
+app.post('/upload', raw(), (req, res) => {
+  const buf = (req as any).body as Buffer;
+  res.json({ bytes: buf.length });
+});
+```
+
+Defaults to `application/octet-stream`; override with `opts.type` (e.g. `raw({ type: 'image/*' })`). Accepts the same `limit`, `inflate`, `type`, and `verify` options as the other parsers. Requests without a body, or whose `Content-Type` doesn't match, pass through to `next()` unchanged.
+
+---
+
+## `text()`
+
+Decodes the request body as a string (using the charset from `Content-Type`) and populates `req.body`.
+
+```ts
+import { text } from 'expediate';
+
+app.post('/note', text(), (req, res) => {
+  const body = (req as any).body as string;
+  res.send(`received ${body.length} chars`);
+});
+```
+
+Defaults to `text/plain`; override with `opts.type` (e.g. `text({ type: 'text/*' })`). Requests without a body, or whose `Content-Type` doesn't match, pass through to `next()` unchanged. Bodies over `limit` get `413 Content Too Large`; decoding errors get `500 Internal Server Error`.
 
 ---
 
@@ -165,9 +199,12 @@ When a body-parser middleware has already consumed the stream, these methods ret
 
 ```ts
 interface BodyOptions {
-  limit?:   string | number;  // default: '100kb'
-  inflate?: boolean;          // default: true — accept gzip/deflate
-  reviver?: Reviver | null;   // default: null — JSON.parse reviver
+  limit?:   string | number;        // default: '100kb'
+  inflate?: boolean;                // default: true — accept gzip/deflate/br
+  reviver?: Reviver | null;         // default: null — JSON.parse reviver
+  strict?:  boolean;                // default: true — json() only: reject bare top-level primitives
+  type?:    BodyTypeMatcher;        // override the content-type this parser matches
+  verify?:  VerifyFn;               // (req, res, buf, encoding) => void; throw to reject
 }
 ```
 
@@ -181,6 +218,6 @@ Request body decompression is controlled by the `inflate` option (default `true`
 - `deflate`
 - `identity` (no-op)
 
-Unknown `Content-Encoding` values produce `415 Unsupported Media Type`.
+- `br` (Brotli)
 
-> Brotli request decompression (`Content-Encoding: br`) is not currently supported.
+Unknown `Content-Encoding` values produce `415 Unsupported Media Type`.
