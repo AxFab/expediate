@@ -16,6 +16,8 @@
  *  - Multiple HTTP verbs in one spec
  *  - Vendor extension pass-through (x-* keys)
  *  - Explicit '500' in responses suppresses injected ApiError ref
+ *  - openApiSpec() with an array of sources (ServiceDefinition and/or
+ *    spec-only ServiceOpenApi), merged into one document
  */
 
 import { describe as testDescribe, it } from 'node:test';
@@ -36,6 +38,7 @@ import type {
   OperationMeta,
   OpenApiDocument,
   ServiceDefinition,
+  ServiceOpenApi,
 } from '../src/index';
 
 // ---------------------------------------------------------------------------
@@ -1033,5 +1036,136 @@ testDescribe('openApiSpec() — ServiceDefinition.schemas', () => {
     });
     assert.deepEqual(doc.components.schemas['Item'], { type: 'object' });
     assert.deepEqual(doc.components.schemas['Extra'], { type: 'number' }, 'spec options kept as fallback');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// openApiSpec() — multiple sources (ServiceDefinition + ServiceOpenApi)
+// ---------------------------------------------------------------------------
+
+testDescribe('openApiSpec() — multiple sources', () => {
+  it('merges routes from two ServiceDefinition sources into one document', () => {
+    const todos: ServiceDefinition = { GET: { '/todos': noop } };
+    const users: ServiceDefinition = { GET: { '/users': noop } };
+
+    const doc = openApiSpec([todos, users], { title: 'T', version: '1' });
+
+    assert.ok(doc.paths['/todos']);
+    assert.ok(doc.paths['/users']);
+  });
+
+  it('documents a ServiceOpenApi source with no handlers', () => {
+    const authDocs: ServiceOpenApi = {
+      openapi: { tag: 'auth' },
+      POST: {
+        '/auth/login':   { summary: 'Log in' },
+        '/auth/refresh': { summary: 'Refresh a token' },
+        '/auth/logout':  { summary: 'Log out' },
+      },
+    };
+
+    const doc = openApiSpec(authDocs, { title: 'T', version: '1' });
+
+    const login = doc.paths['/auth/login'].post as any;
+    assert.equal(login.summary, 'Log in');
+    assert.deepEqual(login.tags, ['auth']);
+    assert.ok(doc.paths['/auth/refresh']);
+    assert.ok(doc.paths['/auth/logout']);
+  });
+
+  it('mixes a real ServiceDefinition and a spec-only ServiceOpenApi in one document', () => {
+    const todos: ServiceDefinition = {
+      openapi: { tag: 'todos' },
+      GET: { '/todos': noop },
+    };
+    const authDocs: ServiceOpenApi = {
+      openapi: { tag: 'auth' },
+      POST: { '/auth/login': { summary: 'Log in' } },
+    };
+
+    const doc = openApiSpec([authDocs, todos], { title: 'T', version: '1' });
+
+    assert.ok(doc.paths['/auth/login']);
+    assert.ok(doc.paths['/todos']);
+    assert.deepEqual(doc.tags, [
+      { name: 'auth',  description: undefined },
+      { name: 'todos', description: undefined },
+    ]);
+  });
+
+  it('throws on a duplicate (verb, path) pair declared across two different sources', () => {
+    const a: ServiceDefinition = { GET: { '/x': noop } };
+    const b: ServiceOpenApi    = { GET: { '/x': { summary: 'duplicate' } } };
+
+    assert.throws(
+      () => openApiSpec([a, b], { title: 'T', version: '1' }),
+      /duplicate route GET \/x/,
+    );
+  });
+
+  it('resolves each route\'s default tag from its own source, not a shared global', () => {
+    const a: ServiceDefinition = { openapi: { tag: 'a-tag' }, GET: { '/a': noop } };
+    const b: ServiceOpenApi    = { openapi: { tag: 'b-tag' }, GET: { '/b': { summary: 'b' } } };
+
+    const doc = openApiSpec([a, b], { title: 'T', version: '1' });
+
+    assert.deepEqual((doc.paths['/a'].get as any).tags, ['a-tag']);
+    assert.deepEqual((doc.paths['/b'].get as any).tags, ['b-tag']);
+  });
+
+  it('resolves each route\'s permissions vendor-extension from its own source', () => {
+    const a: ServiceDefinition = {
+      auth: { permissionsExtension: 'x-a-perms' },
+      GET:  { '/a': describe(noop, { permission: 'read.a' }) },
+    };
+    const b: ServiceOpenApi = {
+      auth: { permissionsExtension: 'x-b-perms' },
+      GET:  { '/b': { permission: 'read.b' } },
+    };
+
+    const doc = openApiSpec([a, b], { title: 'T', version: '1' });
+
+    const opA = doc.paths['/a'].get as any;
+    const opB = doc.paths['/b'].get as any;
+    assert.deepEqual(opA['x-a-perms'], ['read.a']);
+    assert.equal(opA['x-b-perms'], undefined);
+    assert.deepEqual(opB['x-b-perms'], ['read.b']);
+    assert.equal(opB['x-a-perms'], undefined);
+  });
+
+  it('components.securitySchemes.bearerAuth comes from the first source declaring auth.scheme', () => {
+    const a: ServiceDefinition = { GET: { '/a': describe(noop, { permission: 'read' }) } };
+    const b: ServiceOpenApi = {
+      auth: { scheme: { type: 'apiKey', in: 'header', name: 'X-Api-Key' } },
+      GET:  { '/b': { permission: 'read' } },
+    };
+
+    const doc = openApiSpec([a, b], { title: 'T', version: '1' });
+
+    assert.deepEqual(doc.components.securitySchemes!.bearerAuth,
+      { type: 'apiKey', in: 'header', name: 'X-Api-Key' });
+  });
+
+  it('merges schemas and responses across sources, later source winning on conflicts', () => {
+    const a: ServiceDefinition = {
+      openapi: { schemas: { Shared: { type: 'string', description: 'from a' } } },
+      GET: { '/a': noop },
+    };
+    const b: ServiceOpenApi = {
+      openapi: { schemas: { Shared: { type: 'object', description: 'from b' } } },
+      GET: { '/b': { summary: 'b' } },
+    };
+
+    const doc = openApiSpec([a, b], { title: 'T', version: '1' });
+
+    assert.strictEqual(doc.components.schemas['Shared'].description, 'from b');
+    assert.ok(doc.components.schemas['ApiError'], 'built-in ApiError must still be present');
+  });
+
+  it('a single source passed directly (not wrapped in an array) behaves exactly as before', () => {
+    const service: ServiceDefinition = { GET: { '/x': noop } };
+    const fromValue = openApiSpec(service, { title: 'T', version: '1' });
+    const fromArray = openApiSpec([service], { title: 'T', version: '1' });
+    assert.deepEqual(fromValue, fromArray);
   });
 });

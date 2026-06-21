@@ -20,8 +20,17 @@
  */
 'use strict';
 
-import { collectRoutes } from './apis.js';
-import type { ServiceMethod, ServiceInstance, ServiceDefinition, ApiContext, Guard } from './apis.js';
+import { joinPath, routeScore, normalizePermission } from './apis.js';
+import type {
+  ServiceMethod,
+  ServiceInstance,
+  ServiceDefinition,
+  ApiContext,
+  Guard,
+  ApiVerb,
+  AuthBinding,
+  ApiBuilderOptions,
+} from './apis.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -164,6 +173,107 @@ export interface OpenApiServiceMeta {
    */
   responses?: Record<string, ResponseObject>;
 }
+
+/**
+ * A route map for spec-only documentation: keys are Express-style path
+ * patterns, values are {@link OperationMeta} objects directly. There is no
+ * handler to call here — only something to describe.
+ */
+export type RouteOpenApi = Record<string, OperationMeta>;
+
+/**
+ * A spec-only counterpart to `ControllerDefinition`: groups documented
+ * routes under a shared path prefix, default tags, and a default permission
+ * requirement, without any of the request-handling fields (`guards`).
+ */
+export interface ControllerOpenApi {
+  /** Path prefix prepended to every route in this controller (may contain params). */
+  prefix?: string;
+  /** Default OpenAPI tags applied to routes that do not declare their own. */
+  tags?: string[];
+  /** Default permission requirement for every route of this controller. */
+  permission?: string | string[];
+
+  /** Documented `GET` operations (paths relative to `prefix`). */
+  GET?:    RouteOpenApi;
+  /** Documented `POST` operations (paths relative to `prefix`). */
+  POST?:   RouteOpenApi;
+  /** Documented `PUT` operations (paths relative to `prefix`). */
+  PUT?:    RouteOpenApi;
+  /** Documented `DELETE` operations (paths relative to `prefix`). */
+  DELETE?: RouteOpenApi;
+  /** Documented `PATCH` operations (paths relative to `prefix`). */
+  PATCH?:  RouteOpenApi;
+}
+
+/**
+ * A spec-only counterpart to {@link ServiceDefinition}, for documenting
+ * routes that have no `ServiceDefinition` of their own — most notably the
+ * JWT plugin's `/auth/login`, `/auth/refresh`, and `/auth/logout` endpoints,
+ * which are mounted directly with `app.post(...)` rather than through
+ * `apiBuilder`.
+ *
+ * It carries the same OpenAPI-relevant shape as `ServiceDefinition`
+ * (controllers, root route maps, schemas, auth binding, service-level
+ * `openapi` metadata) but route map values are {@link OperationMeta} objects
+ * instead of handler functions, and there is no instance lifecycle
+ * (`scope` / `data` / `setup` / `methods`) to run.
+ *
+ * `guards` and `validate` are accepted only for structural parity with
+ * {@link ServiceDefinition}; spec generation ignores both — there is no
+ * request pipeline here to run them against.
+ */
+export interface ServiceOpenApi {
+  /** Sub-controllers merged into this source, same merge rules as `ServiceDefinition.controllers`. */
+  controllers?: ControllerOpenApi[];
+  /** Ignored by spec generation; accepted for structural parity with `ServiceDefinition.guards`. */
+  guards?: Guard[];
+  /** Authentication binding — `scheme` and `permissionsExtension` affect the generated spec. */
+  auth?: AuthBinding;
+  /** Ignored by spec generation; accepted for structural parity with `ServiceDefinition.validate`. */
+  validate?: boolean | ApiBuilderOptions;
+  /**
+   * Reusable JSON Schema components merged into `components.schemas`
+   * (see {@link ServiceDefinition.schemas}).
+   */
+  schemas?: Record<string, JsonSchema>;
+  /** Service-level OpenAPI metadata (default tag, shared schemas/responses). */
+  openapi?: OpenApiServiceMeta;
+
+  /** Documented `GET` operations. */
+  GET?:    RouteOpenApi;
+  /** Documented `POST` operations. */
+  POST?:   RouteOpenApi;
+  /** Documented `PUT` operations. */
+  PUT?:    RouteOpenApi;
+  /** Documented `DELETE` operations. */
+  DELETE?: RouteOpenApi;
+  /** Documented `PATCH` operations. */
+  PATCH?:  RouteOpenApi;
+}
+
+/**
+ * Anything {@link openApiSpec} can document: a real {@link ServiceDefinition}
+ * (the kind built by `apiBuilder`) or a spec-only {@link ServiceOpenApi}
+ * describing routes that aren't backed by a service at all.
+ *
+ * `openApiSpec` accepts a single source or an array of sources, so a real API
+ * and hand-documented routes can be merged into one document:
+ *
+ * ```ts
+ * const authDocs: ServiceOpenApi = {
+ *   openapi: { tag: 'auth' },
+ *   POST: {
+ *     '/auth/login':   { summary: 'Log in',         requestBody: loginBody },
+ *     '/auth/refresh': { summary: 'Refresh a token', requestBody: refreshBody },
+ *     '/auth/logout':  { summary: 'Log out' },
+ *   },
+ * };
+ *
+ * const spec = openApiSpec([authDocs, todoService], { title: 'Todo API', version: '1.0.0' });
+ * ```
+ */
+export type OpenApiSource = ServiceDefinition<any> | ServiceOpenApi;
 
 /**
  * Top-level options passed to {@link openApiSpec}.
@@ -585,6 +695,148 @@ function buildAnnotatedResponses(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-source route collection (spec-generation counterpart to `collectRoutes`)
+// ---------------------------------------------------------------------------
+
+/**
+ * The five HTTP verbs `openApiSpec` looks for route maps under.
+ *
+ * Kept as a private duplicate of `apis.ts`'s internal `VERBS` (only the
+ * derived {@link ApiVerb} type is exported from there) — not worth exporting
+ * a const for.
+ */
+const VERBS: ApiVerb[] = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
+
+/**
+ * A route map value before its kind is known: either a handler function
+ * (possibly `describe()`-annotated) or a plain {@link OperationMeta} object
+ * (the {@link ServiceOpenApi} case).
+ */
+type MergedRouteMap = Record<string, ServiceMethod<any> | OperationMeta>;
+
+/**
+ * A unified controller-shaped view used internally to walk root route maps,
+ * {@link ControllerOpenApi} controllers, and real `ControllerDefinition`
+ * controllers with a single loop.
+ */
+interface MergedController {
+  prefix?:     string;
+  tags?:       string[];
+  permission?: string | string[];
+  GET?:        MergedRouteMap;
+  POST?:       MergedRouteMap;
+  PUT?:        MergedRouteMap;
+  DELETE?:     MergedRouteMap;
+  PATCH?:      MergedRouteMap;
+}
+
+/**
+ * One merged route entry produced by {@link collectOpenApiRoutes}.
+ *
+ * Carries just enough per-source context — default tag, permissions
+ * vendor-extension name — to resolve operation metadata independently of
+ * which source in the array the route came from.
+ */
+interface OpenApiRoute {
+  verb:                  ApiVerb;
+  path:                  string;
+  meta?:                 OperationMeta;
+  tags?:                 string[];
+  permission?:           string[];
+  /** This route's source's default tag (`openapi.tag`), if any. */
+  defaultTag?:           string;
+  /** This route's source's permissions vendor-extension name. */
+  permissionsExtension:  string;
+}
+
+/**
+ * Build the merged, globally-sorted route table for one or more
+ * {@link OpenApiSource} values — the spec-generation counterpart to
+ * `apis.ts`'s `collectRoutes`.
+ *
+ * Deliberately kept separate from `collectRoutes` so the real request
+ * pipeline (`apiBuilder`) is never affected by spec-only concerns: this
+ * function only inspects route *shapes* to produce documentation and never
+ * invokes a handler. A route value is resolved as `describe()`-attached
+ * metadata when it is a function, or used directly as an {@link OperationMeta}
+ * object when it is not (the {@link ServiceOpenApi} case).
+ *
+ * Duplicate `(verb, path)` pairs are detected **across all sources**, not
+ * just within one — extending `collectRoutes`'s single-service duplicate
+ * check to the merged multi-source document.
+ *
+ * @throws Error on a duplicate `(verb, path)` pair across any of the sources.
+ */
+function collectOpenApiRoutes(sources: OpenApiSource[]): OpenApiRoute[] {
+  const routes: OpenApiRoute[] = [];
+  /** Duplicate detection across ALL sources: `"VERB /joined/path"` → declarer label. */
+  const seen = new Map<string, string>();
+
+  sources.forEach((source, sourceIndex) => {
+    const defaultTag           = source.openapi?.tag;
+    const permissionsExtension = source.auth?.permissionsExtension ?? 'x-required-permissions';
+
+    // Root route maps form an implicit, anonymous controller — same trick as
+    // `collectRoutes`'s `rootController`.
+    const rootController: MergedController = {
+      prefix: '',
+      GET:    source.GET,
+      POST:   source.POST,
+      PUT:    source.PUT,
+      DELETE: source.DELETE,
+      PATCH:  source.PATCH,
+    };
+    const controllers: MergedController[] = [rootController, ...(source.controllers ?? [])];
+
+    controllers.forEach((controller, controllerIndex) => {
+      const label = controllerIndex === 0
+        ? `source #${sourceIndex}`
+        : (controller.tags?.[0] ?? controller.prefix ?? `source #${sourceIndex} controller #${controllerIndex}`);
+      const prefix = controller.prefix ?? '';
+
+      for (const verb of VERBS) {
+        const routeMap = controller[verb];
+        if (!routeMap) continue;
+
+        for (const [pattern, value] of Object.entries(routeMap)) {
+          const path = joinPath(prefix, pattern);
+
+          // Loud failure on duplicates, across the whole merged document.
+          const dupKey   = `${verb} ${path}`;
+          const declarer = seen.get(dupKey);
+          if (declarer !== undefined) {
+            throw new Error(
+              `openApiSpec: duplicate route ${verb} ${path}\n` +
+              `  declared by '${declarer}' and '${label}'`);
+          }
+          seen.set(dupKey, label);
+
+          const meta: OperationMeta | undefined = typeof value === 'function'
+            ? (value as { [DESCRIBE_META]?: OperationMeta })[DESCRIBE_META]
+            : value;
+
+          routes.push({
+            verb,
+            path,
+            meta,
+            tags:       meta?.tags ?? controller.tags,
+            permission: normalizePermission(meta?.permission ?? controller.permission),
+            defaultTag,
+            permissionsExtension,
+          });
+        }
+      }
+    });
+  });
+
+  // Global specificity sort across all sources and controllers.
+  routes.sort((a, b) =>
+    routeScore(b.path) - routeScore(a.path) || b.path.localeCompare(a.path));
+
+  return routes;
+}
+
+// ---------------------------------------------------------------------------
 // Core spec generator
 // ---------------------------------------------------------------------------
 
@@ -596,22 +848,35 @@ const DEFAULT_SECURITY_SCHEME: Record<string, unknown> = {
 };
 
 /**
- * Generate an OpenAPI 3.1.0 document from a {@link ServiceDefinition}.
+ * Generate an OpenAPI 3.1.0 document from one or more {@link OpenApiSource}
+ * values — real {@link ServiceDefinition}s, spec-only {@link ServiceOpenApi}
+ * descriptions, or a mix of both in a single array.
  *
  * Route handlers that have been annotated with {@link describe} contribute
  * rich operation metadata (summary, description, parameters, requestBody,
  * responses).  Unannotated handlers receive sensible defaults automatically.
+ * `ServiceOpenApi` route maps provide that same {@link OperationMeta} shape
+ * directly, since there is no handler to annotate.
  *
  * The generated document always includes:
  * - An `ApiError` schema (shape: `{ status?, message?, data? }`) in
  *   `components.schemas`.
  * - An `ApiError` response (`500` reference) in `components.responses`.
  *
- * Caller-supplied `opts.schemas` and service-level `openapi.schemas` are
- * deep-merged on top of the built-in components (caller schemas take
- * precedence over service schemas, which take precedence over built-ins).
+ * Caller-supplied `opts.schemas` and each source's `openapi.schemas` /
+ * `schemas` are merged on top of the built-in components, source by source
+ * in array order — for a single source this preserves the original
+ * precedence exactly: built-ins ← `openapi.schemas` ← `opts.schemas` ←
+ * `schemas`.
  *
- * @param service - The service definition to document.
+ * Routes are merged and duplicate-checked **across all sources** (see
+ * {@link collectOpenApiRoutes}), so passing several sources still produces
+ * ONE document. Each route's default tag and permissions vendor-extension
+ * name are resolved from its own originating source; the
+ * `components.securitySchemes.bearerAuth` value comes from the first source
+ * in array order that declares a custom `auth.scheme`, else the default.
+ *
+ * @param service - The source(s) to document.
  * @param opts    - Top-level spec options (title, version, basePath, …).
  * @returns A fully-formed OpenAPI 3.1.0 document object.
  *
@@ -627,14 +892,27 @@ const DEFAULT_SECURITY_SCHEME: Record<string, unknown> = {
  *   res.json(spec);
  * });
  * ```
+ *
+ * @example Merging a real service with hand-documented auth routes
+ * ```ts
+ * const authDocs: ServiceOpenApi = {
+ *   openapi: { tag: 'auth' },
+ *   POST: {
+ *     '/auth/login':   { summary: 'Log in' },
+ *     '/auth/refresh': { summary: 'Refresh a token' },
+ *     '/auth/logout':  { summary: 'Log out' },
+ *   },
+ * };
+ *
+ * const spec = openApiSpec([authDocs, todoDefinition], { title: 'Todo API', version: '1.0.0' });
+ * ```
  */
-export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>(
-  service: ServiceDefinition<TInstance>,
+export function openApiSpec(
+  service: OpenApiSource | OpenApiSource[],
   opts:    SpecOptions,
 ): OpenApiDocument {
-  const basePath    = opts.basePath ?? '';
-  const svcMeta     = service.openapi;
-  const defaultTag  = svcMeta?.tag;
+  const sources  = Array.isArray(service) ? service : [service];
+  const basePath = opts.basePath ?? '';
 
   // ── Components ──────────────────────────────────────────────────────────────
   const builtinSchemas: Record<string, JsonSchema> = {
@@ -657,37 +935,44 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
     },
   };
 
-  // Merge schemas: built-ins ← service-level openapi meta ← caller-level
-  // ← service-definition `schemas` (last wins).  `ServiceDefinition.schemas`
-  // supersedes `SpecOptions.schemas`; the spec-options form is kept as a
-  // fallback for callers that do not use the shared declaration.
-  const schemas: Record<string, JsonSchema> = {
-    ...builtinSchemas,
-    ...svcMeta?.schemas,
-    ...opts.schemas,
-    ...service.schemas,
-  };
+  // Merge schemas: built-ins ← each source's openapi.schemas (array order)
+  // ← caller-level opts.schemas ← each source's own `schemas` (array order,
+  // last wins).  For a single source this is exactly the original order:
+  // built-ins, service-level openapi meta, caller-level, service-definition
+  // `schemas` — which supersedes `opts.schemas`.
+  let schemas: Record<string, JsonSchema> = { ...builtinSchemas };
+  for (const source of sources) schemas = { ...schemas, ...source.openapi?.schemas };
+  schemas = { ...schemas, ...opts.schemas };
+  for (const source of sources) schemas = { ...schemas, ...source.schemas };
 
-  const responses: Record<string, ResponseObject> = {
-    ...builtinResponses,
-    ...svcMeta?.responses,
-  };
+  let responses: Record<string, ResponseObject> = { ...builtinResponses };
+  for (const source of sources) responses = { ...responses, ...source.openapi?.responses };
 
   // ── Tags ─────────────────────────────────────────────────────────────────────
   const tags: { name: string; description?: string }[] = [];
-  if (defaultTag) {
-    tags.push({ name: defaultTag, description: svcMeta?.tagDescription });
+  const seenTags = new Set<string>();
+  for (const source of sources) {
+    const tag = source.openapi?.tag;
+    if (tag && !seenTags.has(tag)) {
+      seenTags.add(tag);
+      tags.push({ name: tag, description: source.openapi?.tagDescription });
+    }
   }
 
-  // ── Paths ────────────────────────────────────────────────────────────────────
-  // Operates on the merged route table (root route maps + controllers), so a
-  // multi-controller service still produces ONE document.  Controller `tags`
-  // fill in `OperationMeta.tags` when a route declares none.
-  const paths: Record<string, Record<string, unknown>> = {};
-  const routes = collectRoutes(service);
+  // ── Security scheme ──────────────────────────────────────────────────────────
+  // First source in array order that declares a custom scheme wins; falls
+  // back to the default HTTP bearer/JWT scheme.
+  const securityScheme =
+    sources.find(s => s.auth?.scheme)?.auth?.scheme ?? DEFAULT_SECURITY_SCHEME;
 
-  const permissionsExtension = service.auth?.permissionsExtension ?? 'x-required-permissions';
-  let   securedRoutes        = false;
+  // ── Paths ────────────────────────────────────────────────────────────────────
+  // Operates on the merged route table (all sources' root route maps and
+  // controllers), so multiple sources still produce ONE document. Controller
+  // `tags` fill in `OperationMeta.tags` when a route declares none.
+  const paths: Record<string, Record<string, unknown>> = {};
+  const routes = collectOpenApiRoutes(sources);
+
+  let securedRoutes = false;
 
   for (const route of routes) {
     const { verb, path: pattern, meta } = route;
@@ -715,9 +1000,9 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
       responses: operationResponses,
     };
 
-    // Apply route tags (meta-level, else controller-level), then the service
-    // default tag when neither is declared.
-    const opTags = route.tags ?? (defaultTag ? [defaultTag] : undefined);
+    // Apply route tags (meta-level, else controller-level), then this route's
+    // source default tag when neither is declared.
+    const opTags = route.tags ?? (route.defaultTag ? [route.defaultTag] : undefined);
     if (opTags) operation.tags = opTags;
 
     // Carry through any vendor extensions (x-* keys).
@@ -733,8 +1018,8 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
     // the required permissions.
     if (route.permission) {
       securedRoutes = true;
-      operation.security            = [{ bearerAuth: [] }];
-      operation[permissionsExtension]  = route.permission;
+      operation.security                    = [{ bearerAuth: [] }];
+      operation[route.permissionsExtension] = route.permission;
     }
 
     paths[openApiPath][verb.toLowerCase()] = operation;
@@ -757,7 +1042,7 @@ export function openApiSpec<TInstance extends ServiceInstance = ServiceInstance>
       // Emitted once when at least one operation declares a permission.
       ...(securedRoutes && {
         securitySchemes: {
-          bearerAuth: service.auth?.scheme ?? DEFAULT_SECURITY_SCHEME,
+          bearerAuth: securityScheme,
         },
       }),
     },

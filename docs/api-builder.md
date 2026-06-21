@@ -431,9 +431,9 @@ Body-parsing middleware must be registered before the API router for `body` to b
 
 ## OpenAPI spec generation
 
-### `describe(handler, meta)`
+→ Full reference: [docs/openapi.md](openapi.md)
 
-Annotates a route handler with OpenAPI operation metadata. The returned function behaves identically to the handler; the metadata is read by the spec generator and the request pipeline (`guards`, `permission`):
+The router returned by `apiBuilder` can introspect its own definition — controllers included, producing **one** document:
 
 ```ts
 import { describe } from 'expediate';
@@ -441,60 +441,14 @@ import { describe } from 'expediate';
 GET: {
   '/todos/:id': describe(
     function (this: State, ctx) { return this.findOrThrow(ctx.params.id); },
-    {
-      summary:    'Get a todo by ID',
-      tags:       ['todos'],
-      permission: 'todo.read',          // → auth.check + security in the spec
-      responses: {
-        '200': { description: 'The todo', content: { 'application/json': { schema: { $ref: '#/components/schemas/Todo' } } } },
-        '404': { description: 'Not found' },
-      },
-    },
+    { summary: 'Get a todo by ID', tags: ['todos'] },
   ),
 }
-```
 
-`OperationMeta` fields: `summary`, `description`, `operationId`, `tags`, `parameters`, `requestBody`, `responses`, `deprecated`, `guards`, `permission`, plus any `x-*` vendor extensions. Unspecified fields are inferred (path parameters auto-detected, default responses by verb, operationId generated from the verb + path).
-
-### `api.spec(opts)` and `api.specHandler(opts, format?)`
-
-The router returned by `apiBuilder` can introspect its own definition — controllers included, producing **one** document:
-
-```ts
 const api = apiBuilder(service);
-
 app.use('/api', api);
 app.get('/openapi.json', api.specHandler({ title: 'Todo API', version: '1.0.0' }));
 app.get('/openapi.yaml', api.specHandler({ title: 'Todo API', version: '1.0.0' }, 'yaml'));
-
-// Or get the document object directly:
-const doc = api.spec({ title: 'Todo API', version: '1.0.0', basePath: '/api' });
 ```
 
-`openApiSpec(service, opts)` is the underlying free function when you have the definition but not the router.
-
-### Security output
-
-Routes carrying a `permission` (route- or controller-level) automatically receive `security: [{ bearerAuth: [] }]` and an `x-required-permissions: [...]` vendor extension, and `components.securitySchemes.bearerAuth` is emitted once (from `auth.scheme`, defaulting to `{ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }`). The extension name can be changed with `auth.permissionsExtension`.
-
-### `serializeSpec(doc, format?)`
-
-Serialize an `OpenApiDocument` to a JSON or YAML string:
-
-```ts
-import { serializeSpec } from 'expediate';
-
-const json = serializeSpec(doc);          // JSON (default)
-const yaml = serializeSpec(doc, 'yaml');  // YAML
-```
-
-### SpecOptions
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `title` | `string` | **required** | API title |
-| `version` | `string` | **required** | API version |
-| `description` | `string` | — | API description |
-| `basePath` | `string` | — | Prefix prepended to every path |
-| `servers` | `ServerObject[]` | — | OpenAPI server objects |
-| `schemas` | `Record<string, JsonSchema>` | — | Extra component schemas (superseded by `ServiceDefinition.schemas` on name conflicts) |
+`openApiSpec(service, opts)` is the underlying free function when you have the definition but not the router — it also accepts an array of sources to merge in routes that have no `ServiceDefinition` at all (e.g. JWT auth endpoints). See [docs/openapi.md](openapi.md) for `describe()`, security output, `serializeSpec()`, and multi-source merging.

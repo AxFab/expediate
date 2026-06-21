@@ -593,10 +593,13 @@ export interface CollectedRoute<TInstance extends ServiceInstance = ServiceInsta
  * Duplicate slashes are collapsed and a trailing slash is stripped (except
  * for the root path), so `joinPath('/p/:proj/wiki', '/')` → `'/p/:proj/wiki'`.
  *
+ * Exported for use by `openapi.ts` (multi-definition spec merging); not part
+ * of the public package API.
+ *
  * @param prefix - The controller prefix (may be empty).
  * @param path   - The route path relative to the prefix.
  */
-function joinPath(prefix: string, path: string): string {
+export function joinPath(prefix: string, path: string): string {
   const joined = `/${prefix}/${path}`.replace(/\/+/g, '/');
   return joined.length > 1 ? joined.replace(/\/$/, '') : joined;
 }
@@ -607,8 +610,11 @@ function joinPath(prefix: string, path: string): string {
  * `score = (segment count × 100) − (parameter count × 10)`.  Higher scores
  * are registered first so that more precise patterns (more segments, fewer
  * parameters) cannot be shadowed by prefix matches.
+ *
+ * Exported for use by `openapi.ts` (multi-definition spec merging); not part
+ * of the public package API.
  */
-function routeScore(path: string): number {
+export function routeScore(path: string): number {
   const segs = path.split('/').filter(s => s.length > 0);
   return segs.length * 100 - segs.filter(s => s.startsWith(':')).length * 10;
 }
@@ -616,8 +622,11 @@ function routeScore(path: string): number {
 /**
  * Normalise a `permission` declaration (`string | string[]`) to an array,
  * or `undefined` when absent.
+ *
+ * Exported for use by `openapi.ts` (multi-definition spec merging); not part
+ * of the public package API.
  */
-function normalizePermission(permission: string | string[] | undefined): string[] | undefined {
+export function normalizePermission(permission: string | string[] | undefined): string[] | undefined {
   if (permission === undefined) return undefined;
   return Array.isArray(permission) ? permission : [permission];
 }

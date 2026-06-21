@@ -467,7 +467,7 @@ apiBuilder(service, { validateResponses: true }); // validate both incoming bodi
 
 ## OpenAPI spec generation
 
-→ Full reference: [docs/api-builder.md#openapi-spec-generation](docs/api-builder.md#openapi-spec-generation)
+→ Full reference: [docs/openapi.md](docs/openapi.md)
 
 ```ts
 import { apiBuilder, describe } from 'expediate';
@@ -488,6 +488,8 @@ app.get('/openapi.yaml', api.specHandler({ title: 'Items API', version: '1.0.0' 
 ```
 
 Controllers merge into a single document. Routes carrying a `permission` automatically emit `security: [{ bearerAuth: [] }]`, an `x-required-permissions` vendor extension, and the matching `components.securitySchemes` entry.
+
+`openApiSpec()` also accepts an **array of sources** — useful for documenting routes that have no `ServiceDefinition` at all (e.g. JWT auth endpoints mounted directly with `app.post(...)`) alongside a real API in one merged document. See [docs/openapi.md](docs/openapi.md#multiple-sources).
 
 ---
 
