@@ -4,7 +4,7 @@ All notable changes to **expediate** are documented here.
 
 ---
 
-## [1.1.0] — Unreleased
+## [1.0.6] — 25 June 2026
 
 ### Added
 - **API Builder v2** (see `docs/api-builder-v2-design.md`):
@@ -58,7 +58,7 @@ All notable changes to **expediate** are documented here.
 
 ---
 
-## [1.0.4] — 2025
+## [1.0.5] — 8 June 2026
 
 ### Added
 - **ETag / conditional GET** — `res.etag()` response helper and `conditionalGet()` middleware implement RFC 7232 (`If-None-Match`, `If-Modified-Since`) so clients receive 304 Not Modified when their cache is fresh
@@ -75,7 +75,7 @@ All notable changes to **expediate** are documented here.
 
 ---
 
-## [1.0.3] — 2025
+## [1.0.4] — May 2026
 
 ### Added
 - **OpenAPI spec generation** — `describe()`, `openApiSpec()`, and `serializeSpec()` (JSON and YAML) for annotating API service routes with schema metadata
@@ -89,7 +89,7 @@ All notable changes to **expediate** are documented here.
 
 ---
 
-## [1.0.2] — 2025
+## [1.0.3] — Mars 2026
 
 ### Added
 - **JWT authentication plugin** — `createJwtPlugin()` with login, refresh (token rotation), logout, `authenticate`, `authorize`, `requireRole`, and `requirePermission` middleware; HMAC HS256/384/512 support
@@ -98,7 +98,7 @@ All notable changes to **expediate** are documented here.
 
 ---
 
-## [1.0.1] — 2025
+## [1.0.2] — Mars 2026
 
 ### Added
 - **Git Smart HTTP gateway** — `gitHandler()` serves `git clone`, `git fetch`, and `git push` over HTTP; `gitCreate()` initialises bare repositories programmatically
@@ -109,7 +109,7 @@ All notable changes to **expediate** are documented here.
 
 ---
 
-## [1.0.0] — 2025
+## [1.0.1] — Mars 2026
 
 ### Added
 - Initial release
@@ -118,3 +118,21 @@ All notable changes to **expediate** are documented here.
 - `serveStatic()`, `serveFile()`, `sendFile()` for static file serving with ETag caching, dotfile protection, and path traversal guards
 - MIME type detection via `src/mimetypes.json`
 - Dual CJS + ESM output via `tsc` + `esbuild`
+
+---
+
+## [1.0.0] — Mars 2026
+
+_Not documented_
+
+## [0.0.3] — 2022
+
+_Not documented_
+
+## [0.0.2] — 2021
+
+_Not documented_
+
+## [0.0.1] — 2021
+
+_Not documented_
