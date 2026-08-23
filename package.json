@@ -47,7 +47,7 @@
     "bench:check": "npm run bench:check --workspace benchmarks",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "prepack": "npm run lint && npm run test && npm run build && npm pack --dry-run"
+    "prepack": "npm run lint && npm run test && npm run build"
   },
   "workspaces": [
     "benchmarks",
